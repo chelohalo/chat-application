@@ -58,13 +58,80 @@ The backend has a single internal `LlmProvider` interface implemented four times
 | `mock` (or unset + no key) | `MockLlmProvider` | — | Offline, deterministic. Default in tests and demos. |
 | `gemini` | `GeminiLlmProvider` | `https://generativelanguage.googleapis.com/v1beta` | Google AI Studio. Supports both `gemini-*` and `gemma-*` models. Auto-fallback when a model rejects `thinkingConfig`, retries on transient 5xx, filters `thought:true` parts. |
 | `anthropic` (or `claude`) | `AnthropicLlmProvider` | `https://api.anthropic.com/v1` | Claude Messages API. `x-api-key` auth, content-block streaming, `tool_use` round-trip, retries on `529 overloaded`. |
-| `openai`, `groq`, `cerebras`, `together`, `openrouter`, `mistral`, `ollama`, `openai-compatible` | `OpenAICompatibleLlmProvider` | per-alias (see [`env.example`](./env.example)) | OpenAI `/v1/chat/completions` shape. Bearer auth, OpenAI-style tools, `[DONE]` terminator. `LLM_BASE_URL` overrides for self-hosted gateways. |
+| `openai`, `groq`, `cerebras`, `together`, `openrouter`, `mistral`, `ollama`, `openai-compatible` | `OpenAICompatibleLlmProvider` | per-alias (resolved internally from `LLM_PROVIDER`) | OpenAI `/v1/chat/completions` shape. Bearer auth, OpenAI-style tools, `[DONE]` terminator. `LLM_BASE_URL` overrides for self-hosted gateways. |
 
 If `LLM_PROVIDER` isn't set, the backend auto-detects from `LLM_MODEL` (`claude-*` → Anthropic) or `LLM_BASE_URL` (`*.anthropic.com` / `*.googleapis.com` → those providers, otherwise OpenAI-compatible).
 
+### Verified vendor recipes
+
+Copy one of these blocks into `.env` to switch the active provider. The vendor alias alone is enough — the backend knows each vendor's default endpoint, so `LLM_BASE_URL` is only needed for self-hosted or proxied setups.
+
+```env
+# Groq — recommended for free-tier demos (14.4k req/day, ~300 tok/s)
+LLM_PROVIDER=groq
+LLM_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+LLM_MODEL=llama-3.3-70b-versatile
+
+# OpenAI — requires paid account or new-account credit
+LLM_PROVIDER=openai
+LLM_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+LLM_MODEL=gpt-4o-mini
+
+# Cerebras — free tier, Llama family on dedicated inference chips
+LLM_PROVIDER=cerebras
+LLM_API_KEY=csk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+LLM_MODEL=llama3.3-70b
+
+# OpenRouter — proxy to ~100 models, free tier available
+LLM_PROVIDER=openrouter
+LLM_API_KEY=sk-or-xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+LLM_MODEL=meta-llama/llama-3.3-70b-instruct
+
+# Ollama — local, fully offline once the model is pulled
+LLM_PROVIDER=ollama
+LLM_API_KEY=ollama          # any non-empty string; ollama ignores auth
+LLM_MODEL=llama3.1:8b
+
+# Google AI Studio — Gemini family (fast, tight free-tier quota)
+LLM_PROVIDER=gemini
+LLM_API_KEY=AIzaxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+LLM_MODEL=gemini-2.5-flash
+# LLM_BASE_URL not required; defaults to the v1beta endpoint.
+
+# Google AI Studio — Gemma family (slower, 1.5k req/day free tier)
+LLM_PROVIDER=gemini
+LLM_API_KEY=AIzaxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+LLM_MODEL=gemma-3-27b-it
+
+# Anthropic — Claude (requires prepaid credits)
+LLM_PROVIDER=anthropic
+LLM_API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+LLM_MODEL=claude-3-5-haiku-20241022
+# LLM_BASE_URL not required; defaults to https://api.anthropic.com/v1
+
+# Self-hosted OpenAI-compatible gateway (LiteLLM, vLLM, etc.)
+LLM_PROVIDER=openai-compatible
+LLM_API_KEY=whatever-your-gateway-expects
+LLM_MODEL=your-deployed-model
+LLM_BASE_URL=http://your-gateway:4000/v1     # required for custom hosts
+```
+
 ### Vendors that need a gateway
 
-**Azure OpenAI, AWS Bedrock, Google Vertex AI, Cohere native** use different wire formats (`api-key` headers, SigV4, OAuth) and are intentionally NOT implemented as native adapters. Route them through **OpenRouter** (cloud) or **LiteLLM** (self-hosted) and point `LLM_BASE_URL` at the gateway — both expose the OpenAI shape and `OpenAICompatibleLlmProvider` talks to them unchanged. Example presets are in [`env.example`](./env.example).
+**Azure OpenAI, AWS Bedrock, Google Vertex AI, Cohere native** use different wire formats (`api-key` headers, SigV4, OAuth) and are intentionally NOT implemented as native adapters. Route them through **OpenRouter** (cloud) or **LiteLLM** (self-hosted) and point `LLM_BASE_URL` at the gateway — both expose the OpenAI shape and `OpenAICompatibleLlmProvider` talks to them unchanged.
+
+```env
+# Anthropic Claude via OpenRouter (no x-api-key, no custom format)
+LLM_PROVIDER=openrouter
+LLM_API_KEY=sk-or-xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+LLM_MODEL=anthropic/claude-3.5-sonnet
+
+# Any model via a local LiteLLM gateway
+LLM_PROVIDER=openai-compatible
+LLM_API_KEY=anything-your-gateway-expects
+LLM_MODEL=azure/gpt-4o     # whatever name your gateway exposes
+LLM_BASE_URL=http://litellm:4000/v1
+```
 
 ## Reconfigure the persona
 
