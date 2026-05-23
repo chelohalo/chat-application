@@ -102,6 +102,21 @@ describe('ChatController (e2e)', () => {
     expect(res.status).toBe(410);
   });
 
+  it('GET /chat/health/llm returns a probe result with provider/model/issues', async () => {
+    // The scripted provider above always answers with two tokens then done,
+    // never invokes a tool, so the probe must classify it as degraded with
+    // a tools_unsupported issue. This doubles as integration coverage of
+    // LlmHealthService being wired through ChatModule.
+    const res = await request(app.getHttpServer()).get('/chat/health/llm');
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      provider: expect.any(String),
+      model: expect.any(String),
+      status: expect.stringMatching(/ok|degraded|fail/),
+    });
+    expect(Array.isArray(res.body.issues)).toBe(true);
+  });
+
   it('POST /chat/:sessionId/message returns SSE with token frames and a terminal done', async () => {
     const create = await request(app.getHttpServer()).post('/chat/session');
     const { sessionId } = create.body;

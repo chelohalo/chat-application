@@ -8,5 +8,24 @@ body {
 }
 
 body {
-  @apply bg-slate-50 text-slate-900 antialiased;
+  @apply bg-wa-bgLight text-slate-900 antialiased dark:bg-wa-bgDark dark:text-slate-100;
+}
+
+/* Subtle WhatsApp-style wallpaper texture for the message scroller.
+ * Pure CSS (no asset), so it works offline and survives Docker volume mounts.
+ * The pattern is a faint repeating diagonal grid that mimics WA's "doodle"
+ * wallpaper without dragging in a 200KB SVG. */
+.wa-wallpaper {
+  background-color: #efeae2;
+  background-image:
+    radial-gradient(rgba(0, 0, 0, 0.04) 1px, transparent 1px),
+    radial-gradient(rgba(0, 0, 0, 0.025) 1px, transparent 1px);
+  background-size: 18px 18px, 36px 36px;
+  background-position: 0 0, 9px 9px;
+}
+.dark .wa-wallpaper {
+  background-color: #0b141a;
+  background-image:
+    radial-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    radial-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px);
 }

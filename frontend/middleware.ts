@@ -2,54 +2,83 @@ import { NextRequest, NextResponse } from 'next/server';
 import { SESSION_COOKIE } from '@/lib/types';
 
 /**
- * Session bootstrap middleware.
+ * Session bootstrap + validation middleware.
  *
- * Next.js Server Components can READ cookies via `cookies()` but cannot
- * SET them. The assignment requires that the page Server Component receive
- * an already-bootstrapped session — without a client useEffect — so the
- * cookie has to land before page.tsx renders.
+ * Why validation matters: NestJS holds sessions in memory, so any backend
+ * restart silently invalidates every `sid` cookie a browser already holds.
+ * A naive "is the cookie present?" check would let those stale cookies
+ * through, which causes the very first message after a restart to fail with
+ * a 404 from the backend (surfaced to the user as "Session expired").
  *
- * Middleware runs on every navigation request, BEFORE the page renders.
- * If the user has no session cookie, we mint one by calling NestJS and
- * attach a Set-Cookie header to the very same response. The Server Component
- * then sees the cookie via `cookies()` and fetches the (empty) history.
+ * Strategy:
+ *   1. If the cookie exists and the backend still recognises it, pass through.
+ *   2. Otherwise (no cookie OR cookie points at a dead session), mint a
+ *      fresh session via NestJS and replace the cookie before the Server
+ *      Component runs. The Server Component, the BFF Route Handler, and the
+ *      browser then all agree on the same session id.
  *
- * We restrict the matcher to "/" so this doesn't fire on API routes,
- * static assets, or anything else.
+ * The matcher is restricted to "/" so we don't pay an extra round trip on
+ * API routes, static assets, or anything else.
  */
 export async function middleware(req: NextRequest): Promise<NextResponse> {
-  if (req.cookies.get(SESSION_COOKIE)) {
+  const nestUrl = process.env.NEST_API_URL ?? 'http://localhost:3001';
+  const existing = req.cookies.get(SESSION_COOKIE)?.value;
+
+  if (existing && (await isSessionAlive(nestUrl, existing))) {
     return NextResponse.next();
   }
 
-  const nestUrl = process.env.NEST_API_URL ?? 'http://localhost:3001';
+  const fresh = await mintSession(nestUrl);
+  if (!fresh) {
+    // Backend unreachable or returned non-2xx. Drop any stale cookie so the
+    // page doesn't try to use it, and let the Server Component render with
+    // whatever fallback it has (it will surface a generic error banner).
+    const res = NextResponse.next();
+    if (existing) {
+      res.cookies.delete(SESSION_COOKIE);
+      req.cookies.delete(SESSION_COOKIE);
+    }
+    return res;
+  }
+
+  const res = NextResponse.next();
+  res.cookies.set({
+    name: SESSION_COOKIE,
+    value: fresh,
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    path: '/',
+    maxAge: 60 * 60,
+  });
+  // Surface the cookie on this same request so the downstream Server
+  // Component sees it without a redirect.
+  req.cookies.set(SESSION_COOKIE, fresh);
+  return res;
+}
+
+async function isSessionAlive(nestUrl: string, sessionId: string): Promise<boolean> {
   try {
-    const upstream = await fetch(`${nestUrl}/chat/session`, {
+    const res = await fetch(`${nestUrl}/chat/${sessionId}/history`, {
+      cache: 'no-store',
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function mintSession(nestUrl: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${nestUrl}/chat/session`, {
       method: 'POST',
       cache: 'no-store',
     });
-    if (!upstream.ok) {
-      // Fall through — page render will surface a generic "Connection lost"
-      // banner to the user via the ChatBox client component.
-      return NextResponse.next();
-    }
-    const json = (await upstream.json()) as { sessionId: string };
-    const res = NextResponse.next();
-    res.cookies.set({
-      name: SESSION_COOKIE,
-      value: json.sessionId,
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: process.env.NODE_ENV === 'production',
-      path: '/',
-      maxAge: 60 * 60,
-    });
-    // Also surface the cookie on the current request so the Server Component
-    // sees it within THIS render pass, not just on the next round trip.
-    req.cookies.set(SESSION_COOKIE, json.sessionId);
-    return res;
+    if (!res.ok) return null;
+    const json = (await res.json()) as { sessionId: string };
+    return json.sessionId;
   } catch {
-    return NextResponse.next();
+    return null;
   }
 }
 

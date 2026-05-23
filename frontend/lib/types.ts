@@ -31,3 +31,35 @@ export interface BackendTurn {
 }
 
 export const SESSION_COOKIE = 'sid';
+export const THEME_COOKIE = 'theme';
+export type Theme = 'dark' | 'light';
+export const DEFAULT_THEME: Theme = 'light';
+
+/**
+ * Shape returned by GET /chat/health/llm. Mirrors backend's LlmHealth so the
+ * UI can render persistent banners describing what does or doesn't work
+ * with the configured LLM_PROVIDER + LLM_MODEL combination.
+ */
+export type LlmIssueKind =
+  | 'auth'
+  | 'quota'
+  | 'rate_limit'
+  | 'tools_unsupported'
+  | 'thinking_inline'
+  | 'model_not_found'
+  | 'empty_response'
+  | 'unreachable';
+
+export interface LlmIssue {
+  kind: LlmIssueKind;
+  message: string;
+  suggestion?: string;
+}
+
+export interface LlmHealth {
+  status: 'ok' | 'degraded' | 'fail';
+  provider: string;
+  model: string;
+  issues: LlmIssue[];
+  lastChecked: number | null;
+}

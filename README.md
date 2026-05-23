@@ -2,8 +2,8 @@
 
 A streaming multi-turn chat app built around a TypeScript / JavaScript domain expert.
 
-- **Backend** — NestJS, in-memory sessions with clock-injectable 30-min idle expiry, SSE token streaming, Gemini provider with tool calling, mock provider fallback.
-- **Frontend** — Next.js 15 App Router, Server-Component cookie bootstrap, `useOptimistic`, BFF Route Handler that proxies the SSE stream so the NestJS URL and LLM API key never reach the browser.
+- **Backend** — NestJS, in-memory sessions with clock-injectable 30-min idle expiry, SSE token streaming, **provider-agnostic LLM layer** (Gemini, Anthropic Claude, and any OpenAI-compatible vendor — Groq / OpenAI / Cerebras / Together / OpenRouter / Mistral / Ollama / self-hosted gateways), tool calling round-trip, mock provider fallback, proactive `/chat/health/llm` probe that surfaces auth / quota / tools-unsupported / reasoning-leak issues to the UI.
+- **Frontend** — Next.js 15 App Router, Server-Component cookie bootstrap, `useOptimistic`, BFF Route Handler that proxies the SSE stream so the NestJS URL and LLM API key never reach the browser. Persistent health banner + dedicated "Thinking..." indicator for reasoning models that emit `<think>` blocks.
 
 ## Quick start
 
@@ -16,10 +16,11 @@ docker compose up --build
 
 Open <http://localhost:3000>. The backend exposes a health check at <http://localhost:3001/health>.
 
-With the defaults (`LLM_PROVIDER=mock`) the app runs entirely offline against a deterministic mock LLM. To talk to real Gemini:
+With the defaults (`LLM_PROVIDER=mock`) the app runs entirely offline against a deterministic mock LLM. To talk to a real model, set `LLM_PROVIDER` + `LLM_API_KEY` (+ `LLM_MODEL` if you don't want the per-vendor default) — see the full matrix below or [`env.example`](./env.example) for verified presets. The fastest free path is **Groq**:
 
 ```bash
-LLM_PROVIDER=gemini LLM_API_KEY=your_key docker compose up --build
+LLM_PROVIDER=groq LLM_API_KEY=gsk_... LLM_MODEL=llama-3.3-70b-versatile \
+  docker compose up --build
 ```
 
 ### Option 2 — local dev
@@ -46,7 +47,41 @@ cd backend && npm test
 cd frontend && npm test
 ```
 
-19 backend tests + 12 frontend tests, all green.
+75 backend tests + 16 frontend tests, all green.
+
+## Supported LLM providers
+
+The backend has a single internal `LlmProvider` interface implemented four times:
+
+| `LLM_PROVIDER` | Implementation | Default base URL | Notes |
+|---|---|---|---|
+| `mock` (or unset + no key) | `MockLlmProvider` | — | Offline, deterministic. Default in tests and demos. |
+| `gemini` | `GeminiLlmProvider` | `https://generativelanguage.googleapis.com/v1beta` | Google AI Studio. Supports both `gemini-*` and `gemma-*` models. Auto-fallback when a model rejects `thinkingConfig`, retries on transient 5xx, filters `thought:true` parts. |
+| `anthropic` (or `claude`) | `AnthropicLlmProvider` | `https://api.anthropic.com/v1` | Claude Messages API. `x-api-key` auth, content-block streaming, `tool_use` round-trip, retries on `529 overloaded`. |
+| `openai`, `groq`, `cerebras`, `together`, `openrouter`, `mistral`, `ollama`, `openai-compatible` | `OpenAICompatibleLlmProvider` | per-alias (see [`env.example`](./env.example)) | OpenAI `/v1/chat/completions` shape. Bearer auth, OpenAI-style tools, `[DONE]` terminator. `LLM_BASE_URL` overrides for self-hosted gateways. |
+
+If `LLM_PROVIDER` isn't set, the backend auto-detects from `LLM_MODEL` (`claude-*` → Anthropic) or `LLM_BASE_URL` (`*.anthropic.com` / `*.googleapis.com` → those providers, otherwise OpenAI-compatible).
+
+### Vendors that need a gateway
+
+**Azure OpenAI, AWS Bedrock, Google Vertex AI, Cohere native** use different wire formats (`api-key` headers, SigV4, OAuth) and are intentionally NOT implemented as native adapters. Route them through **OpenRouter** (cloud) or **LiteLLM** (self-hosted) and point `LLM_BASE_URL` at the gateway — both expose the OpenAI shape and `OpenAICompatibleLlmProvider` talks to them unchanged. Example presets are in [`env.example`](./env.example).
+
+### Proactive health reporting (`GET /chat/health/llm`)
+
+On first request after boot, the backend probes the configured model with two short streams (text ping + tool ping) and caches the result for 5 minutes. The Server Component reads it during SSR and the UI renders a persistent banner with actionable issues:
+
+| Issue kind | Status | What the banner tells the user |
+|---|---|---|
+| `auth` | fail | API key is invalid — verify `LLM_API_KEY`. |
+| `quota` | fail | API key has no available credits — add billing or switch to `LLM_PROVIDER=groq`. |
+| `model_not_found` | fail | `LLM_MODEL` does not exist on this provider — check the spelling. |
+| `unreachable` | fail | Provider currently down / overloaded. |
+| `tools_unsupported` | degraded | Model doesn't invoke tools — `run_ts_snippet` won't work; suggests a tool-capable model. |
+| `thinking_inline` | degraded | Model emits `<think>` blocks; the app filters them and shows a "Thinking..." indicator instead. |
+| `rate_limit` | degraded | Transient — next request should succeed. |
+| `empty_response` | degraded | Model returned no text on a trivial prompt (safety filter or misconfig). |
+
+Reasoning models like DeepSeek-R1 work transparently: the streaming `<think>` tag is detected mid-stream, the chain-of-thought is suppressed, and the UI swaps the typing dots for a labelled "Thinking..." pill until `</think>` arrives.
 
 ## Architecture
 
@@ -127,8 +162,11 @@ backend/
   src/
     chat/        controllers + DTOs + service that orchestrates sessions and LLM stream
     session/     SessionService with injectable Clock and 30-min idle expiry
-    llm/         LlmService, provider interface, Gemini provider, mock provider, run_ts_snippet tool
-    health/      /health endpoint
+    llm/         LlmService, LlmHealthService (proactive probe), provider interface,
+                 providers/{gemini, anthropic, openai-compatible, mock}.provider.ts,
+                 providers/thinking-filter.ts (suppresses <think> blocks),
+                 tools/run-ts-snippet.tool.ts
+    health/      /health endpoint (process uptime)
     common/      AllExceptionsFilter, SessionExpiredException (410 Gone)
   Dockerfile
 frontend/
@@ -153,6 +191,20 @@ env.example
 ## Bonuses included
 
 - `/health` endpoint with uptime + ISO timestamp, used as the docker-compose health check
-- Auto-scroll, Enter-to-submit, Send disabled while in-flight, relative timestamps (`Intl.RelativeTimeFormat`), blinking cursor on the streaming bubble
+- `GET /chat/health/llm` proactive probe surfacing auth / quota / tool-support / reasoning-leak issues as a persistent banner
+- WhatsApp-inspired UI with light/dark mode, asymmetric bubble tails, per-bubble `HH:MM` timestamps, and animated typing + "Thinking..." indicators
+- Auto-scroll, Enter-to-submit, Send disabled while in-flight, blinking cursor on the streaming bubble, auto re-focus on the input after send
 - Per-session BFF rate limit (≤ 20 / hour) with `Retry-After` header on 429
 - Docker + docker-compose with health-check-gated startup of the frontend on the backend
+
+## Troubleshooting per LLM error
+
+| Symptom in the UI banner | Likely cause | Fix |
+|---|---|---|
+| `Auth: LLM API key is invalid or missing.` | Wrong / unset `LLM_API_KEY` | Re-check the env value. For Anthropic, ensure the key starts with `sk-ant-`; for Groq, `gsk_`. |
+| `Quota: ... no available credits` | OpenAI / Anthropic account has no prepaid balance (the key is valid; the wallet is $0). | Add credits at the provider, or switch to a free-tier vendor: `LLM_PROVIDER=groq` with `LLM_MODEL=llama-3.3-70b-versatile`. |
+| `Quota: ... daily quota is exhausted` | Gemini AI Studio free tier hit RPD limit. | Wait or switch to a model with a higher quota (`gemini-2.5-flash`) or another provider. |
+| `Model: configured LLM_MODEL is not available` | Typo in model id, or model deprecated by the vendor. | Check the provider's models endpoint, update `LLM_MODEL`. |
+| `Tools: model did not invoke the tool` | The chosen model doesn't support OpenAI/Anthropic-style tool calling (small open-source models, certain free models). | Use a tool-capable model: `llama-3.3-70b-versatile` (Groq), `gpt-4o-mini` (OpenAI), `claude-3-5-haiku-20241022` (Anthropic), `gemini-2.5-flash` (Google). |
+| `Reasoning model: <think> blocks emitted inline` | DeepSeek-R1 / QwQ / similar reasoning model. | Nothing to do — the app filters them and shows the "Thinking..." indicator. |
+| `Unreachable: provider overloaded` | Vendor outage. | Retry in a minute; the provider automatically retries 5xx (and Anthropic's 529) with exponential backoff. |

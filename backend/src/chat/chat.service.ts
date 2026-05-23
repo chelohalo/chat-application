@@ -11,6 +11,10 @@ export interface ChatStreamEvent {
   data: Record<string, unknown>;
 }
 
+export const EMPTY_REPLY_FALLBACK =
+  "I couldn't generate a response for that. Could you rephrase your question, " +
+  'or add more detail about the TypeScript topic you want to explore?';
+
 @Injectable()
 export class ChatService {
   constructor(
@@ -87,6 +91,15 @@ export class ChatService {
 
     if (errored) return;
 
+    // Defense against LLMs that complete successfully but produce no text.
+    // Gemini 2.5 with tools, safety-filtered prompts, and a few other edge
+    // cases can return a clean STOP finish reason with zero text tokens.
+    // Without this guard the UI would show an empty assistant bubble.
+    if (!assistantText.trim()) {
+      assistantText = EMPTY_REPLY_FALLBACK;
+      yield { data: { token: assistantText } };
+    }
+
     const turn = this.sessions.appendTurn(sessionId, 'assistant', assistantText);
     yield { data: { done: true, turnIndex: turn.turnIndex } };
   }
@@ -99,6 +112,10 @@ export class ChatService {
         return { data: { tool_call: { name: chunk.name, args: chunk.args } } };
       case 'tool_result':
         return { data: { tool_result: { name: chunk.name, result: chunk.result } } };
+      case 'thinking_start':
+        return { data: { thinking: true } };
+      case 'thinking_end':
+        return { data: { thinking: false } };
       case 'error':
         return { data: { error: chunk.message } };
       case 'done':

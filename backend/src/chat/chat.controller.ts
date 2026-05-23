@@ -13,15 +13,30 @@ import type { Response } from 'express';
 import { ChatService } from './chat.service';
 import { SendMessageDto } from './dto/send-message.dto';
 import { Turn } from '../session/session.types';
+import { LlmHealthService, LlmHealth } from '../llm/llm-health.service';
 
 @Controller('chat')
 export class ChatController {
-  constructor(private readonly chat: ChatService) {}
+  constructor(
+    private readonly chat: ChatService,
+    private readonly llmHealth: LlmHealthService,
+  ) {}
 
   @Post('session')
   @HttpCode(201)
   createSession(): { sessionId: string } {
     return this.chat.createSession();
+  }
+
+  /**
+   * Reports the result of a proactive probe of the configured LLM provider:
+   * auth/quota state, whether tool calling works, whether the model leaks
+   * `<think>` blocks, etc. The frontend renders a persistent banner from
+   * this. Cached for 5 minutes inside LlmHealthService so polling is cheap.
+   */
+  @Get('health/llm')
+  getLlmHealth(): Promise<LlmHealth> {
+    return this.llmHealth.getHealth();
   }
 
   @Get(':sessionId/history')
