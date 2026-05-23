@@ -1,4 +1,4 @@
-import { BackendTurn, LlmHealth } from './types';
+import { BackendTurn, ExpertConfig, LlmHealth } from './types';
 
 /**
  * Server-only NestJS URL. Never imported from a Client Component — the BFF
@@ -60,6 +60,31 @@ export async function fetchLlmHealth(): Promise<LlmHealth | null> {
     });
     if (!res.ok) return null;
     return (await res.json()) as LlmHealth;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Fetches the backend's configured persona snapshot. Used at SSR time to
+ * render the page title, header H1/subtitle, and empty-state placeholder.
+ *
+ * Mirrors fetchLlmHealth's defensive shape: 2s timeout, returns null on
+ * any failure, and the caller falls back to DEFAULT_EXPERT_CONFIG so the
+ * UI never renders blank labels even when the backend is down at boot.
+ */
+export async function fetchExpertConfig(): Promise<ExpertConfig | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2_000);
+  try {
+    const res = await fetch(`${nestBaseUrl()}/chat/config`, {
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as ExpertConfig;
   } catch {
     return null;
   } finally {

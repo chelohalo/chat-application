@@ -16,6 +16,7 @@ import {
   ChatMessage,
   BotMessage,
   UserMessage,
+  ExpertConfig,
   LlmHealth,
   LlmIssue,
 } from '@/lib/types';
@@ -31,6 +32,13 @@ interface ChatBoxProps {
    * that case to avoid showing a misleading "everything is broken" message.
    */
   llmHealth: LlmHealth | null;
+  /**
+   * Persona snapshot resolved at SSR time from `GET /chat/config`. Drives
+   * the empty-state placeholder copy so the prompt always mentions the
+   * configured EXPERT_DOMAIN ("anything about TypeScript", "anything about
+   * sports", etc.). Header H1/subtitle are rendered upstream in page.tsx.
+   */
+  expertConfig: ExpertConfig;
 }
 
 type OptimisticAction = { type: 'add-user'; message: UserMessage };
@@ -39,12 +47,6 @@ interface LiveBot {
   id: string;
   content: string;
   startedAt: number;
-  /**
-   * True between `thinking:true` and `thinking:false` SSE events. While
-   * thinking we render a distinct "Thinking..." indicator instead of the
-   * typing dots so the user knows the model is reasoning, not waiting.
-   */
-  thinking: boolean;
 }
 
 type Banner =
@@ -57,6 +59,7 @@ export function ChatBox({
   sessionId,
   initialMessages,
   llmHealth,
+  expertConfig,
 }: ChatBoxProps): ReactElement {
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [liveBot, setLiveBot] = useState<LiveBot | null>(null);
@@ -114,7 +117,6 @@ export function ChatBox({
         id: liveBotId,
         content: '',
         startedAt: Date.now(),
-        thinking: false,
       });
 
       startTransition(async () => {
@@ -130,12 +132,6 @@ export function ChatBox({
               setLiveBot((prev) =>
                 prev && prev.id === liveBotId
                   ? { ...prev, content: prev.content + tok }
-                  : prev,
-              ),
-            onThinking: (active: boolean) =>
-              setLiveBot((prev) =>
-                prev && prev.id === liveBotId
-                  ? { ...prev, thinking: active }
                   : prev,
               ),
             onSessionExpired: async () => {
@@ -231,14 +227,11 @@ export function ChatBox({
   const turnCount = messages.length;
 
   // The typing indicator shows while we're waiting for the FIRST token from
-  // the bot. While the backend signals that the model is in a <think> block,
-  // we swap dots for a labelled "Thinking..." pill so the user knows the
-  // model is reasoning (not just slow). Once a real token arrives, the
-  // indicator is replaced by the streaming bubble (with blinking cursor).
+  // the bot. Any tool round-trip or `<think>` reasoning block on the backend
+  // happens silently before that first token: the SSE wire stays quiet, the
+  // user just sees the dots animate until visible text starts streaming.
   const showTypingIndicator =
-    liveBot !== null && liveBot.content.length === 0 && !liveBot.thinking;
-  const showThinkingIndicator =
-    liveBot !== null && liveBot.thinking && liveBot.content.length === 0;
+    liveBot !== null && liveBot.content.length === 0;
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
@@ -263,7 +256,7 @@ export function ChatBox({
         <ul className="flex flex-col gap-1.5">
           {renderList.length === 0 && !showTypingIndicator && (
             <li className="mx-auto mt-8 max-w-sm rounded-md bg-amber-50/90 px-4 py-3 text-center text-xs leading-relaxed text-amber-900 shadow-sm dark:bg-amber-950/40 dark:text-amber-200">
-              Start the conversation. Ask anything about TypeScript.
+              Start the conversation. Ask anything about {expertConfig.domain}.
             </li>
           )}
           {renderList.map((m, i) => {
@@ -278,7 +271,6 @@ export function ChatBox({
             );
           })}
           {showTypingIndicator && <TypingIndicator />}
-          {showThinkingIndicator && <ThinkingIndicator />}
         </ul>
       </div>
 
@@ -476,42 +468,6 @@ function MessageBubble({
 }
 
 /**
- * Distinct indicator for the case where the model is actively in a
- * `<think>...</think>` reasoning block (DeepSeek-R1 and friends). The dots
- * are paired with a "Thinking..." label so the user understands the delay is
- * deliberate reasoning, not the network stalling. Reverts to TypingIndicator
- * once the model emits </think>.
- */
-function ThinkingIndicator(): ReactElement {
-  return (
-    <li
-      className="mt-2 flex justify-start"
-      data-testid="thinking-indicator"
-      aria-live="polite"
-      aria-label="Assistant is thinking"
-    >
-      <div className="rounded-lg rounded-tl-sm bg-wa-bubbleInLight px-3 py-2.5 shadow-sm dark:bg-wa-bubbleInDark">
-        <div className="flex items-center gap-2">
-          <span className="text-xs italic text-wa-metaLight dark:text-wa-metaDark">
-            Thinking
-          </span>
-          <span className="flex items-center gap-0.5">
-            {[0, 1, 2].map((i) => (
-              <span
-                key={i}
-                aria-hidden
-                className="inline-block h-1 w-1 rounded-full bg-wa-metaLight animate-typingDot dark:bg-wa-metaDark"
-                style={{ animationDelay: `${i * 0.15}s` }}
-              />
-            ))}
-          </span>
-        </div>
-      </div>
-    </li>
-  );
-}
-
-/**
  * Animated "•••" shown in a bot-styled bubble while the model is "thinking"
  * (no tokens have streamed yet). Three dots stagger their bounce via inline
  * animation-delay so the visual rhythm matches WhatsApp's typing indicator.
@@ -612,7 +568,6 @@ function SpinnerIcon(): ReactElement {
 
 interface StreamHandlers {
   onToken: (token: string) => void;
-  onThinking: (active: boolean) => void;
   onDone: (turnIndex: number, finalText: string) => void;
   onError: (message: string) => void;
   onSessionExpired: () => Promise<void> | void;
@@ -678,10 +633,6 @@ async function streamChat(
           handlers.onToken(parsed.token);
           continue;
         }
-        if (typeof parsed.thinking === 'boolean') {
-          handlers.onThinking(parsed.thinking);
-          continue;
-        }
         if (parsed.error) {
           handlers.onError(String(parsed.error));
           return;
@@ -689,8 +640,9 @@ async function streamChat(
         if (parsed.done === true && typeof parsed.turnIndex === 'number') {
           doneTurnIndex = parsed.turnIndex;
         }
-        // tool_call / tool_result are surfaced silently here; the live bubble
-        // remains empty until real tokens arrive in round 2.
+        // Any other frame shape is by contract impossible (the backend's
+        // SSE surface is token | done | error). We tolerate unknowns silently
+        // so a future backend addition doesn't crash the client.
       }
     }
   } catch {

@@ -2,8 +2,8 @@
 
 A streaming multi-turn chat app built around a TypeScript / JavaScript domain expert.
 
-- **Backend** — NestJS, in-memory sessions with clock-injectable 30-min idle expiry, SSE token streaming, **provider-agnostic LLM layer** (Gemini, Anthropic Claude, and any OpenAI-compatible vendor — Groq / OpenAI / Cerebras / Together / OpenRouter / Mistral / Ollama / self-hosted gateways), tool calling round-trip, mock provider fallback, proactive `/chat/health/llm` probe that surfaces auth / quota / tools-unsupported / reasoning-leak issues to the UI.
-- **Frontend** — Next.js 15 App Router, Server-Component cookie bootstrap, `useOptimistic`, BFF Route Handler that proxies the SSE stream so the NestJS URL and LLM API key never reach the browser. Persistent health banner + dedicated "Thinking..." indicator for reasoning models that emit `<think>` blocks.
+- **Backend** — NestJS, in-memory sessions with clock-injectable 30-min idle expiry, SSE token streaming, **provider-agnostic LLM layer** (Gemini, Anthropic Claude, and any OpenAI-compatible vendor — Groq / OpenAI / Cerebras / Together / OpenRouter / Mistral / Ollama / self-hosted gateways), tool calling round-trip, mock provider fallback, proactive `/chat/health/llm` probe that surfaces auth / quota / tools-unsupported / reasoning-leak issues to the UI, **`/chat/config` endpoint** so the persona / domain / UI copy is fully env-driven without code changes (see [Reconfigure the persona](#reconfigure-the-persona)).
+- **Frontend** — Next.js 15 App Router, Server-Component cookie bootstrap, `useOptimistic`, BFF Route Handler that proxies the SSE stream so the NestJS URL and LLM API key never reach the browser. Persistent health banner for provider issues; the wire surface is a clean `token | done | error` so tool calling and reasoning blocks are invisible to the client.
 
 ## Quick start
 
@@ -66,6 +66,41 @@ If `LLM_PROVIDER` isn't set, the backend auto-detects from `LLM_MODEL` (`claude-
 
 **Azure OpenAI, AWS Bedrock, Google Vertex AI, Cohere native** use different wire formats (`api-key` headers, SigV4, OAuth) and are intentionally NOT implemented as native adapters. Route them through **OpenRouter** (cloud) or **LiteLLM** (self-hosted) and point `LLM_BASE_URL` at the gateway — both expose the OpenAI shape and `OpenAICompatibleLlmProvider` talks to them unchanged. Example presets are in [`env.example`](./env.example).
 
+## Reconfigure the persona
+
+The assistant isn't hardcoded to TypeScript. The persona, off-topic refusal, UI copy, and advertised tool name/description all come from env vars resolved through [`ExpertConfigService`](backend/src/config/expert-config.service.ts):
+
+| Env var | Drives | Default |
+|---|---|---|
+| `EXPERT_DOMAIN` | "Only answer questions related to …" in the system prompt; empty-state placeholder in the UI | `TypeScript and JavaScript` |
+| `EXPERT_DESCRIPTION` | Persona statement at the top of the system prompt; `<meta name="description">` | `You are a senior TypeScript engineer …` |
+| `OFF_TOPIC_MESSAGE` | Verbatim refusal text used by the system prompt AND the mock provider | `I'm a TypeScript coding expert …` |
+| `APP_TITLE` | `<title>`, header H1, derived avatar initials | `TypeScript Coding Expert` |
+| `APP_SUBTITLE` | Header subtitle (the "online · ..." line) | `online · ask TS / JS — try `run console.log(2+2)`` |
+| `EXPERT_TOOL_NAME` *(opt)* | Name advertised to the model for the bundled tool | `run_ts_snippet` |
+| `EXPERT_TOOL_DESCRIPTION` *(opt)* | Tool description advertised to the model | TypeScript-snippet analyzer copy |
+
+Backend exposes the resolved snapshot at `GET /chat/config`. The Next.js Server Component fetches it once at SSR — labels, page title, and empty-state hint all come from this endpoint with a static `DEFAULT_EXPERT_CONFIG` fallback when the backend is briefly unreachable.
+
+**Validation runs at boot** ([`backend/src/config/env.validation.ts`](backend/src/config/env.validation.ts)) and Nest aborts startup with a single grouped error if any var is malformed:
+- Empty strings are rejected (e.g. `EXPERT_DOMAIN=` fails fast instead of silently producing a broken prompt).
+- `EXPERT_TOOL_NAME` must match `/^[a-zA-Z0-9_-]{1,64}$/` — every supported provider (Gemini, OpenAI, Anthropic) enforces this on function names, so we catch the violation at boot rather than as a 400 from upstream.
+- In production (`NODE_ENV=production`), `EXPERT_DOMAIN` and `EXPERT_DESCRIPTION` are **required** so an operator can't forget to override the TypeScript defaults before going live.
+
+**Worked example — switch to a sports expert:**
+
+```env
+EXPERT_DOMAIN="sports"
+EXPERT_DESCRIPTION="You are a sports expert assistant with deep knowledge of major leagues, statistics, and history."
+OFF_TOPIC_MESSAGE="I can only answer questions related to sports."
+APP_TITLE="Sports Expert"
+APP_SUBTITLE="online · ask anything about sports"
+EXPERT_TOOL_NAME="lookup_sport_stats"
+EXPERT_TOOL_DESCRIPTION="Look up athlete or team statistics."
+```
+
+Restart the backend (so `ConfigModule.forRoot({validate})` re-runs) and the next SSR render in the frontend picks up the new labels. No code changes required.
+
 ### Proactive health reporting (`GET /chat/health/llm`)
 
 On first request after boot, the backend probes the configured model with two short streams (text ping + tool ping) and caches the result for 5 minutes. The Server Component reads it during SSR and the UI renders a persistent banner with actionable issues:
@@ -77,11 +112,11 @@ On first request after boot, the backend probes the configured model with two sh
 | `model_not_found` | fail | `LLM_MODEL` does not exist on this provider — check the spelling. |
 | `unreachable` | fail | Provider currently down / overloaded. |
 | `tools_unsupported` | degraded | Model doesn't invoke tools — `run_ts_snippet` won't work; suggests a tool-capable model. |
-| `thinking_inline` | degraded | Model emits `<think>` blocks; the app filters them and shows a "Thinking..." indicator instead. |
+| `thinking_inline` | degraded | Model emits `<think>` blocks; the app filters them server-side so they never reach the client. |
 | `rate_limit` | degraded | Transient — next request should succeed. |
 | `empty_response` | degraded | Model returned no text on a trivial prompt (safety filter or misconfig). |
 
-Reasoning models like DeepSeek-R1 work transparently: the streaming `<think>` tag is detected mid-stream, the chain-of-thought is suppressed, and the UI swaps the typing dots for a labelled "Thinking..." pill until `</think>` arrives.
+Reasoning models like DeepSeek-R1 work transparently: the streaming `<think>` tag is detected mid-stream by the `ThinkingFilter`, the chain-of-thought is suppressed at the provider layer, and the chat service swallows the resulting `thinking_start`/`thinking_end` events so nothing leaks to the SSE wire. The user just sees the typing dots until visible tokens arrive.
 
 ## Architecture
 
@@ -93,10 +128,19 @@ Reasoning models like DeepSeek-R1 work transparently: the streaming `<think>` ta
 │          │ POST /api/chat               │              │ POST /chat/:id/message
 │          │ ──────────────────────────►  │              │ ───────────────────► NestJS
 │          │ ◄── text/event-stream ───────│ pipe SSE     │ ◄── text/event-stream
-└──────────┘                              └──────────────┘   (Gemini streams tokens,
-                                                              tool_use → handler →
-                                                              tool_result → tokens)
+└──────────┘   (token | done | error)     └──────────────┘   (LLM tokens; tool_use →
+                                                              handler → tool_result
+                                                              cycle runs internally
+                                                              before any token leaves)
 ```
+
+**Wire contract** between Next.js BFF and the browser (and between NestJS and the BFF — they're piped verbatim) is intentionally minimal:
+
+- `data: {"token":"..."}` — partial visible text
+- `data: {"done":true,"turnIndex":N}` — terminal success
+- `data: {"error":"..."}` — terminal failure
+
+Tool calling round-trips and `<think>` reasoning blocks happen entirely inside [`ChatService.streamReply`](backend/src/chat/chat.service.ts); their internal events are swallowed before the SSE response is written. The stream is silent for the duration of any tool or reasoning phase and starts emitting once the model's first user-visible token is produced.
 
 The browser **never** talks to NestJS directly. Both `NEST_API_URL` and `LLM_API_KEY` stay on the server.
 
@@ -105,7 +149,7 @@ The browser **never** talks to NestJS directly. Both `NEST_API_URL` and `LLM_API
 - **Secret containment.** `LLM_API_KEY` (and the internal NestJS URL) never appear in the browser network tab.
 - **Cookie locality.** The HTTP-only `sid` cookie lives on the Next.js origin; the BFF reads it server-side and injects it into every NestJS call. The client just sends `{ message }` — it never knows or sees the session id.
 - **One place to swap the wire format.** If we change NestJS from SSE to WebSockets or to a different streaming framing tomorrow, only the Route Handler changes.
-- **Friendly auth surface.** Per-session rate limiting and request validation happen at the BFF tier, close to the user, before we burn an upstream LLM call.
+- **Friendly auth surface.** Per-session rate limiting and request validation happen at the BFF tier, close to the user, before we burn an upstream LLM call. The backend mirrors the same limits as the authoritative gate (defense-in-depth), so direct calls to NestJS can't bypass them.
 
 ### Tool calling loop
 
@@ -132,18 +176,19 @@ Bot: `any` opts out of type-checking entirely — you can dereference, call, or 
      you use it. Use `unknown` for boundaries where you don't yet trust the value.
 ```
 
-**2. Tool call (the streamed `tool_call`/`tool_result` events fire before tokens)**
+**2. Tool call (the `tool_use → handler → tool_result` cycle runs internally; the client just sees tokens once the round-trip completes)**
 
 ```
 You: Run this snippet: console.log(2+2); console.log("hi")
-Bot: [tool_call] run_ts_snippet({ snippet: "console.log(2+2); console.log(\"hi\")" })
-     [tool_result] { ok: true, output: "[stubbed] console.log(2+2)\n[stubbed] console.log(\"hi\")", ... }
-     Bot: It would print:
+  # [internal, swallowed by ChatService — never crosses the SSE wire]
+  # [tool_call]   run_ts_snippet({ snippet: "console.log(2+2); console.log(\"hi\")" })
+  # [tool_result] { ok: true, output: "[stubbed] console.log(2+2)\n[stubbed] console.log(\"hi\")", ... }
+Bot: It would print:
        [stubbed] console.log(2+2)
        [stubbed] console.log("hi")
 ```
 
-In the UI you'll see the user bubble appear instantly (optimistic), then the bot bubble fill in token by token with a blinking cursor. The tool round-trip happens upstream before round-2 streaming begins, so visually there is a short "thinking" pause and then tokens start flowing.
+In the UI you'll see the user bubble appear instantly (optimistic), then a typing-dots indicator for the duration of the tool round-trip, then the bot bubble fills in token by token once round-2 streaming begins.
 
 **3. Off-topic refusal (enforced by system prompt + mock heuristic)**
 
@@ -173,7 +218,7 @@ frontend/
   app/
     page.tsx                 Server Component: reads cookie, fetches initial history
     api/session/route.ts     Cookie bootstrap (POST + DELETE)
-    api/chat/route.ts        BFF SSE proxy + per-session rate limit (20/hour)
+    api/chat/route.ts        BFF SSE proxy + per-session rate limit (20/hour + 5/min burst)
   components/ChatBox.tsx     'use client' — useOptimistic + streaming UI with blinking cursor
   lib/                       types, NestJS client, rate-limit store
   __tests__/                 Jest tests (components project + route project)
@@ -186,15 +231,15 @@ env.example
 
 - **Mock tool sandbox.** `run_ts_snippet`'s "execution" is a deterministic stub (string-matching `console.log` calls) so the tool loop is verifiable end-to-end without exposing arbitrary code execution. Swap in `isolated-vm` or a `tsx`-based runner in production.
 - **In-memory sessions.** Sessions live in a `Map<string, Session>` keyed by uuid, with idle eviction on access. Plug in Redis behind the `SessionService` interface to scale horizontally.
-- **Per-session BFF rate limit** uses a module-level `Map<sessionId, number[]>` sliding window. It's correct for a single Node.js worker; Redis would be needed if the BFF runs behind a multi-instance load balancer.
+- **Per-session rate limit (defense-in-depth).** Two sliding windows per session — `20 / hour` sustained quota + `5 / minute` burst — are enforced at **both** the BFF (early-reject so we don't waste an upstream call) and the NestJS backend (authoritative, can't be bypassed). The closer-reset window wins on a deny, so `Retry-After` reflects the shorter wait. Both layers keep state in a process-local `Map<sessionId, { hourTs: number[]; minuteTs: number[] }>`; swap in Redis for horizontal scaling. See [`backend/src/chat/rate-limit.service.ts`](backend/src/chat/rate-limit.service.ts) and [`frontend/lib/rate-limit.ts`](frontend/lib/rate-limit.ts).
 
 ## Bonuses included
 
 - `/health` endpoint with uptime + ISO timestamp, used as the docker-compose health check
 - `GET /chat/health/llm` proactive probe surfacing auth / quota / tool-support / reasoning-leak issues as a persistent banner
-- WhatsApp-inspired UI with light/dark mode, asymmetric bubble tails, per-bubble `HH:MM` timestamps, and animated typing + "Thinking..." indicators
+- WhatsApp-inspired UI with light/dark mode, asymmetric bubble tails, per-bubble `HH:MM` timestamps, and an animated typing indicator
 - Auto-scroll, Enter-to-submit, Send disabled while in-flight, blinking cursor on the streaming bubble, auto re-focus on the input after send
-- Per-session BFF rate limit (≤ 20 / hour) with `Retry-After` header on 429
+- Per-session rate limit (≤ 20 / hour sustained, ≤ 5 / minute burst) enforced at BFF and backend, with `Retry-After` header and a friendly "try again in Ns" message on 429
 - Docker + docker-compose with health-check-gated startup of the frontend on the backend
 
 ## Troubleshooting per LLM error
@@ -206,5 +251,5 @@ env.example
 | `Quota: ... daily quota is exhausted` | Gemini AI Studio free tier hit RPD limit. | Wait or switch to a model with a higher quota (`gemini-2.5-flash`) or another provider. |
 | `Model: configured LLM_MODEL is not available` | Typo in model id, or model deprecated by the vendor. | Check the provider's models endpoint, update `LLM_MODEL`. |
 | `Tools: model did not invoke the tool` | The chosen model doesn't support OpenAI/Anthropic-style tool calling (small open-source models, certain free models). | Use a tool-capable model: `llama-3.3-70b-versatile` (Groq), `gpt-4o-mini` (OpenAI), `claude-3-5-haiku-20241022` (Anthropic), `gemini-2.5-flash` (Google). |
-| `Reasoning model: <think> blocks emitted inline` | DeepSeek-R1 / QwQ / similar reasoning model. | Nothing to do — the app filters them and shows the "Thinking..." indicator. |
+| `Reasoning model: <think> blocks emitted inline` | DeepSeek-R1 / QwQ / similar reasoning model. | Nothing to do — the app suppresses the thinking blocks server-side; the SSE wire stays silent during reasoning and resumes when visible tokens arrive. |
 | `Unreachable: provider overloaded` | Vendor outage. | Retry in a minute; the provider automatically retries 5xx (and Anthropic's 529) with exponential backoff. |

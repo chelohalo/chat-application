@@ -6,7 +6,11 @@ import React from 'react';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ChatBox } from '@/components/ChatBox';
-import type { ChatMessage, LlmHealth } from '@/lib/types';
+import {
+  DEFAULT_EXPERT_CONFIG,
+  type ChatMessage,
+  type LlmHealth,
+} from '@/lib/types';
 
 function sseStreamBody(frames: string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -52,7 +56,12 @@ describe('<ChatBox />', () => {
       },
     ];
     render(
-      <ChatBox sessionId="abc" initialMessages={initialMessages} llmHealth={null} />,
+      <ChatBox
+        sessionId="abc"
+        initialMessages={initialMessages}
+        llmHealth={null}
+        expertConfig={DEFAULT_EXPERT_CONFIG}
+      />,
     );
     expect(screen.getByText('what is a generic?')).toBeInTheDocument();
     expect(
@@ -71,7 +80,14 @@ describe('<ChatBox />', () => {
     ) as unknown as typeof fetch;
 
     const user = userEvent.setup();
-    render(<ChatBox sessionId="abc" initialMessages={[]} llmHealth={null} />);
+    render(
+      <ChatBox
+        sessionId="abc"
+        initialMessages={[]}
+        llmHealth={null}
+        expertConfig={DEFAULT_EXPERT_CONFIG}
+      />,
+    );
     await user.type(screen.getByLabelText('Message'), 'hello{enter}');
 
     // The optimistic user bubble must be in the DOM BEFORE we resolve the fetch.
@@ -104,7 +120,14 @@ describe('<ChatBox />', () => {
     ) as unknown as typeof fetch;
 
     const user = userEvent.setup();
-    render(<ChatBox sessionId="abc" initialMessages={[]} llmHealth={null} />);
+    render(
+      <ChatBox
+        sessionId="abc"
+        initialMessages={[]}
+        llmHealth={null}
+        expertConfig={DEFAULT_EXPERT_CONFIG}
+      />,
+    );
     await user.type(screen.getByLabelText('Message'), 'hello{enter}');
 
     // Error banner shows up.
@@ -129,7 +152,14 @@ describe('<ChatBox />', () => {
     ) as unknown as typeof fetch;
 
     const user = userEvent.setup();
-    render(<ChatBox sessionId="abc" initialMessages={[]} llmHealth={null} />);
+    render(
+      <ChatBox
+        sessionId="abc"
+        initialMessages={[]}
+        llmHealth={null}
+        expertConfig={DEFAULT_EXPERT_CONFIG}
+      />,
+    );
     await user.type(screen.getByLabelText('Message'), 'hi{enter}');
 
     await waitFor(() =>
@@ -163,7 +193,14 @@ describe('<ChatBox />', () => {
     ) as unknown as typeof fetch;
 
     const user = userEvent.setup();
-    render(<ChatBox sessionId="abc" initialMessages={[]} llmHealth={null} />);
+    render(
+      <ChatBox
+        sessionId="abc"
+        initialMessages={[]}
+        llmHealth={null}
+        expertConfig={DEFAULT_EXPERT_CONFIG}
+      />,
+    );
     await user.type(screen.getByLabelText('Message'), 'hi{enter}');
 
     // Optimistic user bubble + typing indicator visible while we wait.
@@ -203,7 +240,14 @@ describe('<ChatBox />', () => {
       ],
       lastChecked: Date.now(),
     };
-    render(<ChatBox sessionId="abc" initialMessages={[]} llmHealth={health} />);
+    render(
+      <ChatBox
+        sessionId="abc"
+        initialMessages={[]}
+        llmHealth={health}
+        expertConfig={DEFAULT_EXPERT_CONFIG}
+      />,
+    );
     const banner = screen.getByTestId('health-banner');
     expect(banner).toHaveTextContent(/openai/i);
     expect(banner).toHaveTextContent(/gpt-4o-mini/);
@@ -219,11 +263,23 @@ describe('<ChatBox />', () => {
       issues: [],
       lastChecked: Date.now(),
     };
-    render(<ChatBox sessionId="abc" initialMessages={[]} llmHealth={health} />);
+    render(
+      <ChatBox
+        sessionId="abc"
+        initialMessages={[]}
+        llmHealth={health}
+        expertConfig={DEFAULT_EXPERT_CONFIG}
+      />,
+    );
     expect(screen.queryByTestId('health-banner')).not.toBeInTheDocument();
   });
 
-  it('swaps the typing indicator for a "Thinking..." indicator when {thinking:true} arrives', async () => {
+  it('keeps the typing indicator visible while the backend is silent (tool loop / reasoning) and only swaps it out on the first real token', async () => {
+    // The backend now hides tool_call / tool_result / thinking frames from
+    // the wire (see ChatService.toEvent). The UI side of that contract:
+    // while the backend buffers a tool round-trip or a `<think>` block, no
+    // SSE frames arrive at all, and the typing-dots indicator just keeps
+    // animating until the first user-visible token streams in.
     let pushFrame!: (frame: string) => void;
     let closeStream!: () => void;
     const encoder = new TextEncoder();
@@ -243,32 +299,21 @@ describe('<ChatBox />', () => {
     ) as unknown as typeof fetch;
 
     const user = userEvent.setup();
-    render(<ChatBox sessionId="abc" initialMessages={[]} llmHealth={null} />);
+    render(
+      <ChatBox
+        sessionId="abc"
+        initialMessages={[]}
+        llmHealth={null}
+        expertConfig={DEFAULT_EXPERT_CONFIG}
+      />,
+    );
     await user.type(screen.getByLabelText('Message'), 'hi{enter}');
 
-    // Initially shows typing dots (no thinking signal yet).
     await waitFor(() =>
       expect(screen.getByTestId('typing-indicator')).toBeInTheDocument(),
     );
-
-    // Backend signals the model entered a <think> block — UI must swap to
-    // the labelled Thinking indicator.
-    await act(async () => {
-      pushFrame(JSON.stringify({ thinking: true }));
-    });
-    await waitFor(() => {
-      expect(screen.queryByTestId('typing-indicator')).not.toBeInTheDocument();
-      expect(screen.getByTestId('thinking-indicator')).toBeInTheDocument();
-    });
-
-    // </think> arrives — back to typing dots (still no real tokens yet).
-    await act(async () => {
-      pushFrame(JSON.stringify({ thinking: false }));
-    });
-    await waitFor(() => {
-      expect(screen.queryByTestId('thinking-indicator')).not.toBeInTheDocument();
-      expect(screen.getByTestId('typing-indicator')).toBeInTheDocument();
-    });
+    // No "Thinking..." pill is ever rendered now.
+    expect(screen.queryByTestId('thinking-indicator')).not.toBeInTheDocument();
 
     // First real token replaces the indicator with the streaming bubble.
     await act(async () => {
@@ -303,7 +348,14 @@ describe('<ChatBox />', () => {
     };
 
     const user = userEvent.setup();
-    render(<ChatBox sessionId="abc" initialMessages={[]} llmHealth={null} />);
+    render(
+      <ChatBox
+        sessionId="abc"
+        initialMessages={[]}
+        llmHealth={null}
+        expertConfig={DEFAULT_EXPERT_CONFIG}
+      />,
+    );
     await user.type(screen.getByLabelText('Message'), 'hi{enter}');
 
     await waitFor(() =>

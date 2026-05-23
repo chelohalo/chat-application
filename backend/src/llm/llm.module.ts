@@ -7,6 +7,7 @@ import { GeminiLlmProvider } from './providers/gemini.provider';
 import { MockLlmProvider } from './providers/mock.provider';
 import { OpenAICompatibleLlmProvider } from './providers/openai-compatible.provider';
 import { AnthropicLlmProvider } from './providers/anthropic.provider';
+import { ExpertConfigModule } from '../config/expert-config.module';
 
 /**
  * Decide which LlmProvider implementation backs LlmService.
@@ -95,7 +96,7 @@ function selectProvider(
 }
 
 @Module({
-  imports: [ConfigModule],
+  imports: [ConfigModule, ExpertConfigModule],
   providers: [
     LlmService,
     LlmHealthService,

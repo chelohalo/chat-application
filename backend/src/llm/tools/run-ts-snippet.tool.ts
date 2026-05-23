@@ -1,4 +1,5 @@
 import { ToolDefinition } from '../llm.types';
+import { ExpertConfigService } from '../../config/expert-config.service';
 
 export interface RunTsSnippetResult {
   ok: boolean;
@@ -7,51 +8,57 @@ export interface RunTsSnippetResult {
 }
 
 /**
- * Tool: run_ts_snippet
+ * Stub handler shared by every persona. The "execution" is a deterministic
+ * string analyzer — we report what we *would* run and return canned output —
+ * so the tool_use -> handler -> tool_result -> final response cycle is fully
+ * wired without ever evaluating arbitrary code inside the container.
  *
- * This is the single tool the model can invoke. To keep the interview deliverable
- * safe (no arbitrary code execution in the container), the "execution" is a
- * deterministic stub: we report what we *would* run and return canned output.
- *
- * The important property for grading: the tool_use → handler → tool_result → final
- * response cycle is fully wired in the provider, and a real handler is reachable
- * from the LLM call site.
+ * Different domains can rename the tool via EXPERT_TOOL_NAME and rewrite
+ * its description via EXPERT_TOOL_DESCRIPTION; the handler logic stays the
+ * same because for non-TS personas the model is instructed by the system
+ * prompt not to invoke the tool anyway.
  */
-export const runTsSnippetTool: ToolDefinition = {
-  name: 'run_ts_snippet',
-  description:
-    'Statically analyze a short TypeScript snippet and return what it would print. ' +
-    'Use ONLY for snippets the user explicitly asks you to "run" or "evaluate". ' +
-    'Do not invoke for general explanation requests.',
-  parametersJsonSchema: {
-    type: 'object',
-    properties: {
-      snippet: {
-        type: 'string',
-        description: 'A self-contained TypeScript snippet, ideally under 40 lines.',
+function handler(args: Record<string, unknown>): RunTsSnippetResult {
+  const snippet = typeof args.snippet === 'string' ? args.snippet : '';
+  const trimmed = snippet.trim();
+  if (!trimmed) {
+    return { ok: false, output: '', note: 'No snippet provided.' };
+  }
+
+  const lines = trimmed.split('\n').length;
+  const consoleMatches = trimmed.match(/console\.log\([^)]*\)/g) ?? [];
+  const simulatedOutput =
+    consoleMatches.length > 0
+      ? consoleMatches.map((c) => `[stubbed] ${c}`).join('\n')
+      : '[stubbed] (no console.log calls detected)';
+
+  return {
+    ok: true,
+    output: simulatedOutput,
+    note: `Stub TS sandbox: analyzed ${lines} line(s). Replace with a real isolated-vm or tsx-runner in production.`,
+  };
+}
+
+/**
+ * Build the single tool exposed to the model, parameterized by the
+ * configured persona. Default name/description preserve the original
+ * TypeScript behavior so existing tests + sample interactions still pass.
+ */
+export function buildExpertTool(config: ExpertConfigService): ToolDefinition {
+  return {
+    name: config.toolName,
+    description: config.toolDescription,
+    parametersJsonSchema: {
+      type: 'object',
+      properties: {
+        snippet: {
+          type: 'string',
+          description:
+            'A self-contained input the tool should analyze (e.g. a TypeScript snippet under 40 lines).',
+        },
       },
+      required: ['snippet'],
     },
-    required: ['snippet'],
-  },
-  handler: (args): RunTsSnippetResult => {
-    const snippet = typeof args.snippet === 'string' ? args.snippet : '';
-    const trimmed = snippet.trim();
-    if (!trimmed) {
-      return { ok: false, output: '', note: 'No snippet provided.' };
-    }
-
-    // Stubbed "execution": surface a deterministic, safe summary.
-    const lines = trimmed.split('\n').length;
-    const consoleMatches = trimmed.match(/console\.log\([^)]*\)/g) ?? [];
-    const simulatedOutput =
-      consoleMatches.length > 0
-        ? consoleMatches.map((c) => `[stubbed] ${c}`).join('\n')
-        : '[stubbed] (no console.log calls detected)';
-
-    return {
-      ok: true,
-      output: simulatedOutput,
-      note: `Stub TS sandbox: analyzed ${lines} line(s). Replace with a real isolated-vm or tsx-runner in production.`,
-    };
-  },
-};
+    handler,
+  };
+}

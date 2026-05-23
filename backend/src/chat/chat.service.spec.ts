@@ -112,7 +112,7 @@ describe('ChatService', () => {
     expect(sessions.getHistory(s.id)).toHaveLength(1);
   });
 
-  it('forwards tool_call and tool_result events to the client', async () => {
+  it('swallows tool_call and tool_result chunks; only visible tokens reach the client', async () => {
     const { service, sessions } = buildService([
       { type: 'tool_call', name: 'run_ts_snippet', args: { snippet: 'console.log(1)' } },
       { type: 'tool_result', name: 'run_ts_snippet', result: { ok: true, output: '1' } },
@@ -123,11 +123,26 @@ describe('ChatService', () => {
     const history = service.beginStream(s.id, 'run console.log(1)');
     const events = await drain(service.streamReply(s.id, 'run console.log(1)', history));
 
-    expect(events.map((e) => Object.keys(e)[0])).toEqual([
-      'tool_call',
-      'tool_result',
-      'token',
-      'done',
+    expect(events).toEqual([
+      { token: 'It prints 1.' },
+      { done: true, turnIndex: 1 },
+    ]);
+  });
+
+  it('swallows thinking_start and thinking_end markers; client sees only token+done', async () => {
+    const { service, sessions } = buildService([
+      { type: 'thinking_start' },
+      { type: 'thinking_end' },
+      { type: 'token', token: 'Done thinking.' },
+      { type: 'done' },
+    ]);
+    const s = sessions.create();
+    const history = service.beginStream(s.id, 'piensa');
+    const events = await drain(service.streamReply(s.id, 'piensa', history));
+
+    expect(events).toEqual([
+      { token: 'Done thinking.' },
+      { done: true, turnIndex: 1 },
     ]);
   });
 });

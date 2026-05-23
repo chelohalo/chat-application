@@ -10,6 +10,20 @@ services:
       - LLM_API_KEY=${LLM_API_KEY:-}
       - LLM_MODEL=${LLM_MODEL:-gemini-2.0-flash}
       - CORS_ORIGIN=http://localhost:3000
+      # Configurable persona (ExpertConfigService). Use the "- VAR" form (no
+      # "=") so an unset var on the host stays unset inside the container
+      # instead of being passed through as an empty string, which the env
+      # validator would reject. EXPERT_DOMAIN and EXPERT_DESCRIPTION are
+      # required by the validator when NODE_ENV=production (which is always
+      # true here), so either set them in .env or remove the prod gate in
+      # backend/src/config/env.validation.ts.
+      - EXPERT_DOMAIN
+      - EXPERT_DESCRIPTION
+      - OFF_TOPIC_MESSAGE
+      - APP_TITLE
+      - APP_SUBTITLE
+      - EXPERT_TOOL_NAME
+      - EXPERT_TOOL_DESCRIPTION
     ports:
       - "3001:3001"
     healthcheck:

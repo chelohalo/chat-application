@@ -116,16 +116,55 @@ describe('/api/chat BFF route handler', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('enforces per-session rate limit and returns 429 with Retry-After', async () => {
+  it('enforces the per-minute burst window and returns 429 reason=minute', async () => {
     global.fetch = jest.fn(async () => sseUpstream([])) as unknown as typeof fetch;
-    // Burn through the budget.
-    for (let i = 0; i < RATE_LIMIT_CONFIG.MAX_REQUESTS; i++) {
-      const ok = await POST(makeReq({ message: 'hi' }));
+    // Burn through the burst budget.
+    for (let i = 0; i < RATE_LIMIT_CONFIG.MINUTE_MAX; i++) {
+      const ok = await POST(makeReq({ message: `hi ${i}` }));
       expect(ok.status).toBe(200);
     }
-    const limited = await POST(makeReq({ message: 'hi' }));
+    const limited = await POST(makeReq({ message: 'one too many' }));
     expect(limited.status).toBe(429);
     expect(Number(limited.headers.get('retry-after'))).toBeGreaterThan(0);
+    expect(Number(limited.headers.get('retry-after'))).toBeLessThanOrEqual(60);
+    const json = (await limited.json()) as {
+      error: string;
+      reason: string;
+      retryAfterSec: number;
+    };
+    expect(json.reason).toBe('minute');
+    expect(json.error).toContain('5/min');
+    expect(json.retryAfterSec).toBeGreaterThan(0);
+  });
+
+  it('passes through upstream 429 verbatim when the backend rejects', async () => {
+    global.fetch = jest.fn(async () =>
+      new Response(
+        JSON.stringify({
+          error: 'Rate limit exceeded (20/hour per session). Try again in 1800s.',
+          reason: 'hour',
+          retryAfterSec: 1800,
+        }),
+        {
+          status: 429,
+          headers: {
+            'Content-Type': 'application/json',
+            'Retry-After': '1800',
+          },
+        },
+      ),
+    ) as unknown as typeof fetch;
+
+    const res = await POST(makeReq({ message: 'hi' }));
+    expect(res.status).toBe(429);
+    expect(res.headers.get('retry-after')).toBe('1800');
+    const json = (await res.json()) as {
+      error: string;
+      reason: string;
+      retryAfterSec: number;
+    };
+    expect(json.reason).toBe('hour');
+    expect(json.retryAfterSec).toBe(1800);
   });
 
   it('returns 502 when the upstream is unreachable', async () => {

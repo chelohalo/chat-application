@@ -17,8 +17,11 @@ interface ChatRequestBody {
  * BFF SSE proxy.
  *
  * - Reads sessionId from the HttpOnly cookie (never trusts the request body).
- * - Enforces per-session rate limit (≤ 20 / hour).
+ * - Early-rejects with 429 when the local two-window limiter (20/hour and
+ *   5/minute burst) trips, so we don't even ping NestJS in that case.
  * - Pipes NestJS's text/event-stream response straight through.
+ * - On 429 from NestJS (the authoritative backend gate), the backend's
+ *   JSON body and Retry-After header are passed through verbatim.
  * - On 404 / 410 from NestJS, returns { sessionExpired: true } JSON so the
  *   client can clear the cookie and reload.
  */
@@ -42,9 +45,15 @@ export async function POST(req: NextRequest): Promise<Response> {
 
   const rl = checkRateLimit(sessionId);
   if (!rl.allowed) {
+    const limit =
+      rl.reason === 'minute'
+        ? `${RATE_LIMIT_CONFIG.MINUTE_MAX}/min`
+        : `${RATE_LIMIT_CONFIG.HOUR_MAX}/hour`;
     return NextResponse.json(
       {
-        error: `Rate limit exceeded (${RATE_LIMIT_CONFIG.MAX_REQUESTS}/hour per session). Try again later.`,
+        error: `Rate limit exceeded (${limit} per session). Try again in ${rl.retryAfterSec}s.`,
+        reason: rl.reason,
+        retryAfterSec: rl.retryAfterSec,
       },
       {
         status: 429,
@@ -74,6 +83,27 @@ export async function POST(req: NextRequest): Promise<Response> {
   if (upstream.status === 400) {
     return NextResponse.json({ error: 'Message cannot be empty.' }, { status: 400 });
   }
+  if (upstream.status === 429) {
+    // The backend is the authoritative gate. If our local view said "ok" but
+    // the backend says "rate-limited" (e.g. another client on the same
+    // session hit it from outside), surface the backend's verdict to the
+    // user verbatim instead of pretending the request went through.
+    const retryAfter = upstream.headers.get('Retry-After') ?? '60';
+    const upstreamBody = await upstream
+      .text()
+      .then((t) => {
+        try {
+          return JSON.parse(t) as Record<string, unknown>;
+        } catch {
+          return { error: 'Rate limit exceeded. Try again later.' };
+        }
+      })
+      .catch(() => ({ error: 'Rate limit exceeded. Try again later.' }));
+    return NextResponse.json(upstreamBody, {
+      status: 429,
+      headers: { 'Retry-After': retryAfter },
+    });
+  }
   if (!upstream.ok || !upstream.body) {
     return NextResponse.json(
       { error: `Backend error ${upstream.status}` },
@@ -89,7 +119,8 @@ export async function POST(req: NextRequest): Promise<Response> {
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
-      'X-RateLimit-Remaining': String(rl.remaining),
+      'X-RateLimit-Remaining-Hour': String(rl.remaining.hour),
+      'X-RateLimit-Remaining-Minute': String(rl.remaining.minute),
     },
   });
 }

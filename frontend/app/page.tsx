@@ -6,11 +6,13 @@ import {
   createNestSession,
   fetchNestHistory,
   fetchLlmHealth,
+  fetchExpertConfig,
 } from '@/lib/nest-client';
 import {
   SESSION_COOKIE,
   THEME_COOKIE,
   DEFAULT_THEME,
+  DEFAULT_EXPERT_CONFIG,
   BackendTurn,
   ChatMessage,
   Theme,
@@ -70,14 +72,29 @@ function turnsToMessages(turns: BackendTurn[]): ChatMessage[] {
   );
 }
 
+/**
+ * Build a short, glyph-style avatar from the configured app title:
+ * 'TypeScript Coding Expert' -> 'TC', 'Sports Expert' -> 'SE', etc.
+ * Falls back to a single character or '??' so the avatar never collapses.
+ */
+function avatarFromTitle(title: string): string {
+  const initials = title
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((w) => w[0]?.toUpperCase() ?? '')
+    .join('');
+  return initials || '??';
+}
+
 export default async function Page(): Promise<ReactElement> {
-  // Bootstrap session and probe LLM health in parallel — neither blocks the
-  // other. The health fetch has its own 2s timeout and returns null on any
-  // failure, so we degrade gracefully if the backend is briefly slow.
-  const [{ sessionId, initialMessages }, llmHealth] = await Promise.all([
-    bootstrap(),
-    fetchLlmHealth(),
-  ]);
+  // Bootstrap session, probe LLM health, and fetch the configured persona
+  // in parallel — none block the others. Each defensive fetch has its own
+  // short timeout and returns null on failure, so we degrade gracefully
+  // if the backend is briefly slow at boot.
+  const [{ sessionId, initialMessages }, llmHealth, expertConfigRaw] =
+    await Promise.all([bootstrap(), fetchLlmHealth(), fetchExpertConfig()]);
+  const expertConfig = expertConfigRaw ?? DEFAULT_EXPERT_CONFIG;
   const jar = await cookies();
   const cookieTheme = jar.get(THEME_COOKIE)?.value;
   const theme: Theme =
@@ -90,18 +107,17 @@ export default async function Page(): Promise<ReactElement> {
           aria-hidden
           className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/15 font-mono text-sm font-semibold tracking-tight"
         >
-          TS
+          {avatarFromTitle(expertConfig.appTitle)}
         </div>
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-base font-medium leading-tight">
-            TypeScript Coding Expert
+            {expertConfig.appTitle}
           </h1>
           <p
             className="truncate text-xs text-white/70"
             aria-label="Assistant status"
           >
-            online · ask TS / JS — try{' '}
-            <em className="not-italic">&ldquo;run console.log(2+2)&rdquo;</em>
+            {expertConfig.appSubtitle}
           </p>
         </div>
         <span
@@ -116,6 +132,7 @@ export default async function Page(): Promise<ReactElement> {
         sessionId={sessionId}
         initialMessages={initialMessages}
         llmHealth={llmHealth}
+        expertConfig={expertConfig}
       />
     </main>
   );

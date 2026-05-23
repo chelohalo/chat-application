@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { SessionService } from '../session/session.service';
 import { LlmService } from '../llm/llm.service';
 import { LlmStreamChunk } from '../llm/llm.types';
@@ -17,6 +17,8 @@ export const EMPTY_REPLY_FALLBACK =
 
 @Injectable()
 export class ChatService {
+  private readonly logger = new Logger(ChatService.name);
+
   constructor(
     private readonly sessions: SessionService,
     private readonly llm: LlmService,
@@ -53,9 +55,17 @@ export class ChatService {
    * first so validation errors surface as HTTP status codes; this generator
    * never throws session-state errors itself.
    *
-   *   - token chunks: { token: "..." }
-   *   - tool lifecycle: { tool_call: {name, args} } and { tool_result: {name, result} }
-   *   - terminal: { done: true, turnIndex: N } or { error: "LLM unavailable" }
+   * Public wire surface (only these three frame shapes reach the client):
+   *   - { token: "..." }                user-visible model output
+   *   - { done: true, turnIndex: N }    terminal success
+   *   - { error: "..." }                terminal failure
+   *
+   * Tool calling round-trips and `<think>` block buffering happen entirely
+   * inside the provider + this method. The associated internal LlmStreamChunk
+   * kinds (`tool_call`, `tool_result`, `thinking_start`, `thinking_end`) are
+   * swallowed here — only their `debug` log lines escape, for operator
+   * observability. Net effect: the client sees an open SSE stream silent
+   * until the first real token arrives.
    *
    * The assistant turn is committed only once the stream completes successfully
    * so a partial failure doesn't pollute conversation history.
@@ -75,6 +85,16 @@ export class ChatService {
         newMessage: userMessage,
         systemPrompt: '',
       })) {
+        if (chunk.type === 'tool_call') {
+          this.logger.debug(`tool_call: ${chunk.name}`);
+        } else if (chunk.type === 'tool_result') {
+          this.logger.debug(`tool_result: ${chunk.name}`);
+        } else if (chunk.type === 'thinking_start') {
+          this.logger.debug('thinking_start');
+        } else if (chunk.type === 'thinking_end') {
+          this.logger.debug('thinking_end');
+        }
+
         const event = this.toEvent(chunk);
         if (event) yield event;
 
@@ -104,22 +124,24 @@ export class ChatService {
     yield { data: { done: true, turnIndex: turn.turnIndex } };
   }
 
+  /**
+   * Map an internal LlmStreamChunk to a public SSE frame. Only `token` and
+   * `error` cross the wire; tool lifecycle and thinking-block markers are
+   * internal-only and return null so the SSE stream stays silent during
+   * tool round-trips and reasoning blocks. The `done` frame is synthesized
+   * by streamReply itself (with the persisted turnIndex), not here.
+   */
   private toEvent(chunk: LlmStreamChunk): ChatStreamEvent | null {
     switch (chunk.type) {
       case 'token':
         return { data: { token: chunk.token } };
-      case 'tool_call':
-        return { data: { tool_call: { name: chunk.name, args: chunk.args } } };
-      case 'tool_result':
-        return { data: { tool_result: { name: chunk.name, result: chunk.result } } };
-      case 'thinking_start':
-        return { data: { thinking: true } };
-      case 'thinking_end':
-        return { data: { thinking: false } };
       case 'error':
         return { data: { error: chunk.message } };
+      case 'tool_call':
+      case 'tool_result':
+      case 'thinking_start':
+      case 'thinking_end':
       case 'done':
-        // We emit our own terminal "done" with the persisted turnIndex.
         return null;
     }
   }

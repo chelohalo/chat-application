@@ -4,6 +4,7 @@ import { Test } from '@nestjs/testing';
 import { LlmRequest, LlmStreamChunk, ToolDefinition } from './llm.types';
 import { GeminiLlmProvider } from './providers/gemini.provider';
 import { ConfigService } from '@nestjs/config';
+import { ExpertConfigService } from '../config/expert-config.service';
 
 class RecordingProvider implements LlmProvider {
   capturedReq?: LlmRequest;
@@ -26,13 +27,26 @@ async function collect<T>(it: AsyncIterable<T>): Promise<T[]> {
   return out;
 }
 
+/**
+ * Construct ExpertConfigService against an in-memory env so tests don't
+ * depend on process.env state. Pass `env` to override individual values.
+ */
+function buildExpertConfig(
+  env: Record<string, string | undefined> = {},
+): ExpertConfigService {
+  const cfg = {
+    get: <T = string>(key: string): T | undefined => env[key] as T | undefined,
+  } as unknown as ConfigService;
+  return new ExpertConfigService(cfg);
+}
+
 describe('LlmService', () => {
   it('forwards history + newMessage to provider with a default system prompt', async () => {
     const provider = new RecordingProvider([
       { type: 'token', token: 'hello' },
       { type: 'done' },
     ]);
-    const svc = new LlmService(provider);
+    const svc = new LlmService(provider, buildExpertConfig());
     const out = await collect(
       svc.stream({
         history: [
@@ -51,11 +65,40 @@ describe('LlmService', () => {
     ]);
   });
 
-  it('exposes the run_ts_snippet tool to the provider', async () => {
+  it('exposes the default tool name (run_ts_snippet) to the provider', async () => {
     const provider = new RecordingProvider([{ type: 'done' }]);
-    const svc = new LlmService(provider);
+    const svc = new LlmService(provider, buildExpertConfig());
     await collect(svc.stream({ history: [], newMessage: 'hi', systemPrompt: '' }));
     expect(provider.capturedTools?.map((t) => t.name)).toEqual(['run_ts_snippet']);
+  });
+
+  it('renames the tool when EXPERT_TOOL_NAME is set', async () => {
+    const provider = new RecordingProvider([{ type: 'done' }]);
+    const svc = new LlmService(
+      provider,
+      buildExpertConfig({ EXPERT_TOOL_NAME: 'lookup_stats' }),
+    );
+    await collect(svc.stream({ history: [], newMessage: 'hi', systemPrompt: '' }));
+    expect(provider.capturedTools?.map((t) => t.name)).toEqual(['lookup_stats']);
+  });
+
+  it('uses the configured persona in the synthesized system prompt', async () => {
+    const provider = new RecordingProvider([{ type: 'done' }]);
+    const svc = new LlmService(
+      provider,
+      buildExpertConfig({
+        EXPERT_DOMAIN: 'sports',
+        EXPERT_DESCRIPTION: 'You are a sports expert.',
+        OFF_TOPIC_MESSAGE: 'I can only answer questions related to sports.',
+        EXPERT_TOOL_NAME: 'lookup_stats',
+        EXPERT_TOOL_DESCRIPTION: 'Look up sports stats.',
+      }),
+    );
+    await collect(svc.stream({ history: [], newMessage: 'hi', systemPrompt: '' }));
+    expect(provider.capturedReq?.systemPrompt).toContain('You are a sports expert.');
+    expect(provider.capturedReq?.systemPrompt).toContain('sports');
+    expect(provider.capturedReq?.systemPrompt).toContain('lookup_stats');
+    expect(provider.capturedReq?.systemPrompt).not.toMatch(/TypeScript/);
   });
 
   it('forwards the full tool_call -> tool_result -> token sequence to the caller', async () => {
@@ -66,7 +109,7 @@ describe('LlmService', () => {
       { type: 'token', token: 'prints 1.' },
       { type: 'done' },
     ]);
-    const svc = new LlmService(provider);
+    const svc = new LlmService(provider, buildExpertConfig());
     const out = await collect(
       svc.stream({ history: [], newMessage: 'run this', systemPrompt: '' }),
     );
@@ -87,6 +130,7 @@ describe('LlmService', () => {
           provide: LLM_PROVIDER,
           useValue: new RecordingProvider([{ type: 'done' }]),
         },
+        { provide: ExpertConfigService, useValue: buildExpertConfig() },
       ],
     }).compile();
     const svc = moduleRef.get(LlmService);

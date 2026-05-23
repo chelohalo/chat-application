@@ -1,16 +1,23 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { LlmProvider } from './llm-provider.interface';
 import { LlmRequest, LlmStreamChunk, ToolDefinition } from '../llm.types';
+import { ExpertConfigService } from '../../config/expert-config.service';
 
 /**
  * Deterministic, network-free provider used when no LLM_API_KEY is configured
  * and in unit tests. Demonstrates the tool-call loop: if the user asks the model
- * to "run" or "evaluate" something, we invoke the matching tool first and then
- * stream a reply that references the tool result.
+ * to "run" or "evaluate" something, we invoke the configured tool first and
+ * then stream a reply that references the tool result.
+ *
+ * Persona copy (refusal, on-topic reply) is pulled from ExpertConfigService
+ * so swapping EXPERT_DOMAIN / OFF_TOPIC_MESSAGE in env immediately changes
+ * the mock's outputs too.
  */
 @Injectable()
 export class MockLlmProvider implements LlmProvider {
   private readonly logger = new Logger(MockLlmProvider.name);
+
+  constructor(private readonly expertConfig: ExpertConfigService) {}
 
   async *stream(
     req: LlmRequest,
@@ -20,10 +27,7 @@ export class MockLlmProvider implements LlmProvider {
     const offTopic = this.detectOffTopic(lower);
 
     if (offTopic) {
-      const refusal =
-        "I'm a TypeScript coding expert and can only help with TypeScript/JavaScript questions. " +
-        'Could you ask me something in that area?';
-      for (const token of this.tokenize(refusal)) {
+      for (const token of this.tokenize(this.expertConfig.offTopicMessage)) {
         yield { type: 'token', token };
       }
       yield { type: 'done' };
@@ -34,7 +38,8 @@ export class MockLlmProvider implements LlmProvider {
     let toolNote = '';
 
     if (wantsRun) {
-      const tool = tools.find((t) => t.name === 'run_ts_snippet');
+      const toolName = this.expertConfig.toolName;
+      const tool = tools.find((t) => t.name === toolName);
       if (tool) {
         const snippet = this.extractSnippet(req.newMessage) ?? req.newMessage;
         yield {
@@ -56,8 +61,8 @@ export class MockLlmProvider implements LlmProvider {
     }
 
     const reply =
-      `Here is what I can tell you about that TypeScript question.${toolNote} ` +
-      'Let me know if you want me to dig deeper into types, generics, or runtime behavior.';
+      `Here is what I can tell you about that ${this.expertConfig.domain} question.${toolNote} ` +
+      'Let me know if you want me to dig deeper.';
 
     for (const token of this.tokenize(reply)) {
       yield { type: 'token', token };
@@ -76,7 +81,11 @@ export class MockLlmProvider implements LlmProvider {
   }
 
   private detectOffTopic(lower: string): boolean {
-    // Lightweight heuristic that mirrors what the real system prompt enforces.
+    // Lightweight heuristic that mirrors what the system prompt enforces.
+    // This is mock-only and intentionally TypeScript-leaning; swapping
+    // EXPERT_DOMAIN at the real-provider layer is what actually drives
+    // refusal in production. On non-TS domains these terms may misfire
+    // (e.g. EXPERT_DOMAIN=cooking + "recipe" -> still flagged off-topic).
     const offTopicTerms = [
       'recipe',
       'weather',

@@ -1,12 +1,27 @@
 import type { Metadata } from 'next';
 import { cookies } from 'next/headers';
-import { THEME_COOKIE, DEFAULT_THEME, Theme } from '@/lib/types';
+import {
+  THEME_COOKIE,
+  DEFAULT_THEME,
+  DEFAULT_EXPERT_CONFIG,
+  Theme,
+} from '@/lib/types';
+import { fetchExpertConfig } from '@/lib/nest-client';
 import './globals.css';
 
-export const metadata: Metadata = {
-  title: 'TypeScript Coding Expert',
-  description: 'Chat with a TypeScript domain-expert assistant.',
-};
+/**
+ * Resolve `<title>` and `<meta name="description">` from the backend's
+ * configured persona. Falls back to DEFAULT_EXPERT_CONFIG (TypeScript) if
+ * /chat/config is unreachable at SSR time so search engines/social cards
+ * never see blank metadata.
+ */
+export async function generateMetadata(): Promise<Metadata> {
+  const cfg = (await fetchExpertConfig()) ?? DEFAULT_EXPERT_CONFIG;
+  return {
+    title: cfg.appTitle,
+    description: cfg.description,
+  };
+}
 
 export default async function RootLayout({
   children,
