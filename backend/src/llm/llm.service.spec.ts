@@ -72,16 +72,6 @@ describe('LlmService', () => {
     expect(provider.capturedTools?.map((t) => t.name)).toEqual(['run_ts_snippet']);
   });
 
-  it('renames the tool when EXPERT_TOOL_NAME is set', async () => {
-    const provider = new RecordingProvider([{ type: 'done' }]);
-    const svc = new LlmService(
-      provider,
-      buildExpertConfig({ EXPERT_TOOL_NAME: 'lookup_stats' }),
-    );
-    await collect(svc.stream({ history: [], newMessage: 'hi', systemPrompt: '' }));
-    expect(provider.capturedTools?.map((t) => t.name)).toEqual(['lookup_stats']);
-  });
-
   it('uses the configured persona in the synthesized system prompt', async () => {
     const provider = new RecordingProvider([{ type: 'done' }]);
     const svc = new LlmService(
@@ -90,15 +80,16 @@ describe('LlmService', () => {
         EXPERT_DOMAIN: 'sports',
         EXPERT_DESCRIPTION: 'You are a sports expert.',
         OFF_TOPIC_MESSAGE: 'I can only answer questions related to sports.',
-        EXPERT_TOOL_NAME: 'lookup_stats',
-        EXPERT_TOOL_DESCRIPTION: 'Look up sports stats.',
       }),
     );
     await collect(svc.stream({ history: [], newMessage: 'hi', systemPrompt: '' }));
     expect(provider.capturedReq?.systemPrompt).toContain('You are a sports expert.');
     expect(provider.capturedReq?.systemPrompt).toContain('sports');
-    expect(provider.capturedReq?.systemPrompt).toContain('lookup_stats');
-    expect(provider.capturedReq?.systemPrompt).not.toMatch(/TypeScript/);
+    // Tool name is fixed regardless of persona.
+    expect(provider.capturedReq?.systemPrompt).toContain('run_ts_snippet');
+    // The description text should not leak "TypeScript" for non-TS personas
+    // beyond the tool-specific sentence.
+    expect(provider.capturedReq?.systemPrompt).toContain('Only answer questions related to sports.');
   });
 
   it('forwards the full tool_call -> tool_result -> token sequence to the caller', async () => {
@@ -223,6 +214,152 @@ describe('GeminiLlmProvider', () => {
     const types = out.map((c) => c.type);
     expect(types).toEqual(['tool_call', 'tool_result', 'token', 'done']);
     expect(out.find((c) => c.type === 'token')).toMatchObject({ token: 'It prints 4.' });
+  });
+
+  it('propagates the round-1 thoughtSignature into the round-2 functionCall part', async () => {
+    // Gemini 2.5+ "thinking" models attach a thoughtSignature to the
+    // functionCall part. Round 2 must echo it verbatim, otherwise the API
+    // returns 400 "Function call is missing a thought_signature".
+    const round1 = sseStream([
+      {
+        candidates: [
+          {
+            content: {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    name: 'run_ts_snippet',
+                    args: { snippet: 'console.log(1)' },
+                    thoughtSignature: 'sig-abc-123',
+                  },
+                },
+              ],
+            },
+            finishReason: 'STOP',
+          },
+        ],
+      },
+    ]);
+    const round2 = sseStream([
+      {
+        candidates: [
+          {
+            content: { role: 'model', parts: [{ text: 'prints 1.' }] },
+            finishReason: 'STOP',
+          },
+        ],
+      },
+    ]);
+    const responses = [round1, round2];
+    const fetchCalls: { url: string; body: any }[] = [];
+    global.fetch = (async (url: string, init: RequestInit) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body as string) });
+      return {
+        ok: true,
+        body: responses.shift()!,
+        text: async () => '',
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    const provider = new GeminiLlmProvider(
+      new ConfigService({ LLM_API_KEY: 'k', LLM_MODEL: 'gemini-2.5-flash' }),
+    );
+    const tool: ToolDefinition = {
+      name: 'run_ts_snippet',
+      description: 'stub',
+      parametersJsonSchema: { type: 'object' },
+      handler: async () => ({ ok: true, output: '1' }),
+    };
+
+    await collect(
+      provider.stream(
+        { history: [], newMessage: 'run console.log(1)', systemPrompt: 's' },
+        [tool],
+      ),
+    );
+
+    expect(fetchCalls).toHaveLength(2);
+    const round2Contents = fetchCalls[1].body.contents as Array<{
+      role: string;
+      parts: Array<{ functionCall?: { thoughtSignature?: string } }>;
+    }>;
+    const modelEcho = round2Contents.find((c) => c.role === 'model');
+    expect(modelEcho?.parts[0].functionCall?.thoughtSignature).toBe('sig-abc-123');
+  });
+
+  it('omits thoughtSignature in round 2 when round 1 did not emit one (older / non-thinking models)', async () => {
+    const round1 = sseStream([
+      {
+        candidates: [
+          {
+            content: {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    name: 'run_ts_snippet',
+                    args: { snippet: 'console.log(1)' },
+                    // No thoughtSignature here — pre-2.5 models / gemma.
+                  },
+                },
+              ],
+            },
+            finishReason: 'STOP',
+          },
+        ],
+      },
+    ]);
+    const round2 = sseStream([
+      {
+        candidates: [
+          {
+            content: { role: 'model', parts: [{ text: 'prints 1.' }] },
+            finishReason: 'STOP',
+          },
+        ],
+      },
+    ]);
+    const responses = [round1, round2];
+    const fetchCalls: { url: string; body: any }[] = [];
+    global.fetch = (async (url: string, init: RequestInit) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body as string) });
+      return {
+        ok: true,
+        body: responses.shift()!,
+        text: async () => '',
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    const provider = new GeminiLlmProvider(
+      new ConfigService({ LLM_API_KEY: 'k', LLM_MODEL: 'gemini-2.0-flash' }),
+    );
+    const tool: ToolDefinition = {
+      name: 'run_ts_snippet',
+      description: 'stub',
+      parametersJsonSchema: { type: 'object' },
+      handler: async () => ({ ok: true, output: '1' }),
+    };
+
+    await collect(
+      provider.stream(
+        { history: [], newMessage: 'run console.log(1)', systemPrompt: 's' },
+        [tool],
+      ),
+    );
+
+    const round2Contents = fetchCalls[1].body.contents as Array<{
+      role: string;
+      parts: Array<{ functionCall?: Record<string, unknown> }>;
+    }>;
+    const modelEcho = round2Contents.find((c) => c.role === 'model');
+    expect(modelEcho?.parts[0].functionCall).toBeDefined();
+    expect(
+      Object.prototype.hasOwnProperty.call(
+        modelEcho!.parts[0].functionCall!,
+        'thoughtSignature',
+      ),
+    ).toBe(false);
   });
 
   it('maps a 500 from the upstream to a transient-outage user message', async () => {

@@ -1,21 +1,17 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { LLM_PROVIDER, LlmProvider } from './providers/llm-provider.interface';
 import { LlmRequest, LlmStreamChunk, ToolDefinition } from './llm.types';
-import { buildExpertTool } from './tools/run-ts-snippet.tool';
+import { runTsSnippetTool } from './tools/run-ts-snippet.tool';
 import { ExpertConfigService } from '../config/expert-config.service';
 
 @Injectable()
 export class LlmService {
-  private readonly tools: ToolDefinition[];
+  private readonly tools: ToolDefinition[] = [runTsSnippetTool];
 
   constructor(
     @Inject(LLM_PROVIDER) private readonly provider: LlmProvider,
     private readonly expertConfig: ExpertConfigService,
-  ) {
-    // Built once at boot so the model always sees a consistent tool name
-    // even though ExpertConfigService.toolName is technically a getter.
-    this.tools = [buildExpertTool(expertConfig)];
-  }
+  ) {}
 
   /**
    * Stream the assistant reply for the given conversation. The returned

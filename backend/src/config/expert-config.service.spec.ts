@@ -20,11 +20,9 @@ describe('ExpertConfigService', () => {
       expect(svc.offTopicMessage).toMatch(/TypeScript coding expert/);
       expect(svc.appTitle).toBe('TypeScript Coding Expert');
       expect(svc.appSubtitle).toMatch(/ask TS \/ JS/);
-      expect(svc.toolName).toBe('run_ts_snippet');
-      expect(svc.toolDescription).toMatch(/TypeScript snippet/);
     });
 
-    it('buildSystemPrompt includes the default domain and tool name', () => {
+    it('buildSystemPrompt includes the default domain and the fixed tool name', () => {
       const p = svc.buildSystemPrompt();
       expect(p).toContain('TypeScript and JavaScript');
       expect(p).toContain('run_ts_snippet');
@@ -39,10 +37,6 @@ describe('ExpertConfigService', () => {
         offTopicMessage: expect.stringMatching(/TypeScript coding expert/),
         appTitle: 'TypeScript Coding Expert',
         appSubtitle: expect.stringMatching(/ask TS \/ JS/),
-        tool: {
-          name: 'run_ts_snippet',
-          description: expect.stringMatching(/TypeScript snippet/),
-        },
       });
     });
   });
@@ -54,8 +48,6 @@ describe('ExpertConfigService', () => {
       OFF_TOPIC_MESSAGE: 'I can only answer questions related to sports.',
       APP_TITLE: 'Sports Expert',
       APP_SUBTITLE: 'online \u00b7 ask anything about sports',
-      EXPERT_TOOL_NAME: 'lookup_stats',
-      EXPERT_TOOL_DESCRIPTION: 'Look up athlete or team statistics.',
     });
 
     it('every getter reflects the overridden value', () => {
@@ -65,19 +57,17 @@ describe('ExpertConfigService', () => {
         'I can only answer questions related to sports.',
       );
       expect(svc.appTitle).toBe('Sports Expert');
-      expect(svc.toolName).toBe('lookup_stats');
-      expect(svc.toolDescription).toBe('Look up athlete or team statistics.');
     });
 
-    it('buildSystemPrompt interpolates the configured domain + refusal + tool', () => {
+    it('buildSystemPrompt interpolates the configured domain + refusal but keeps the fixed tool name', () => {
       const p = svc.buildSystemPrompt();
       expect(p).toContain('You are a sports expert assistant.');
       expect(p).toContain('Only answer questions related to sports.');
       expect(p).toContain(
         '"I can only answer questions related to sports."',
       );
-      expect(p).toContain('lookup_stats');
-      expect(p).not.toMatch(/TypeScript/);
+      // Tool name is fixed regardless of persona.
+      expect(p).toContain('run_ts_snippet');
     });
 
     it('snapshot returns the overridden values', () => {
@@ -87,10 +77,6 @@ describe('ExpertConfigService', () => {
         offTopicMessage: 'I can only answer questions related to sports.',
         appTitle: 'Sports Expert',
         appSubtitle: 'online \u00b7 ask anything about sports',
-        tool: {
-          name: 'lookup_stats',
-          description: 'Look up athlete or team statistics.',
-        },
       });
     });
   });

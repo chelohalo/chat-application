@@ -12,7 +12,6 @@ export interface ExpertConfigSnapshot {
   offTopicMessage: string;
   appTitle: string;
   appSubtitle: string;
-  tool: { name: string; description: string };
 }
 
 /**
@@ -27,12 +26,16 @@ export interface ExpertConfigSnapshot {
  *   OFF_TOPIC_MESSAGE
  *   APP_TITLE
  *   APP_SUBTITLE
- *   EXPERT_TOOL_NAME
- *   EXPERT_TOOL_DESCRIPTION
  *
  * to repurpose the assistant for a different domain (sports, cooking,
  * physics, etc.) without code changes. See env.example for a worked
  * example.
+ *
+ * Note: the bundled tool (`run_ts_snippet`, the stub TS snippet analyzer)
+ * is fixed by design. Its name and description are not env-driven because
+ * the handler itself is a stub specific to TypeScript — renaming it would
+ * be cosmetic only. If you need a different tool for a different domain,
+ * replace the handler in run-ts-snippet.tool.ts.
  */
 @Injectable()
 export class ExpertConfigService {
@@ -67,19 +70,6 @@ export class ExpertConfigService {
     );
   }
 
-  get toolName(): string {
-    return this.config.get<string>('EXPERT_TOOL_NAME') ?? 'run_ts_snippet';
-  }
-
-  get toolDescription(): string {
-    return (
-      this.config.get<string>('EXPERT_TOOL_DESCRIPTION') ??
-      'Statically analyze a short TypeScript snippet and return what it would print. ' +
-        'Use ONLY for snippets the user explicitly asks you to "run" or "evaluate". ' +
-        'Do not invoke for general explanation requests.'
-    );
-  }
-
   /**
    * Concatenated system prompt that LlmService passes to every provider.
    * Sections (Scope / Tools / Style) mirror the original hardcoded prompt;
@@ -94,7 +84,7 @@ export class ExpertConfigService {
       `- If the user asks something outside the domain, refuse with: "${this.offTopicMessage}". Do not attempt to answer off-topic questions even partially.`,
       '',
       'Tools:',
-      `- You have a single tool, ${this.toolName}: ${this.toolDescription} Invoke it ONLY when the user explicitly asks you to "run", "execute" or "evaluate" a specific input. Do not invoke it just to illustrate explanations.`,
+      '- You have a single tool, run_ts_snippet, that statically analyzes a short TypeScript snippet and returns what it would print. Invoke it ONLY when the user explicitly asks you to "run", "execute" or "evaluate" a specific input. Do not invoke it just to illustrate explanations.',
       '',
       'Style:',
       '- Be concise. Prefer code blocks for code examples.',
@@ -114,7 +104,6 @@ export class ExpertConfigService {
       offTopicMessage: this.offTopicMessage,
       appTitle: this.appTitle,
       appSubtitle: this.appSubtitle,
-      tool: { name: this.toolName, description: this.toolDescription },
     };
   }
 }

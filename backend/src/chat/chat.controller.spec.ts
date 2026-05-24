@@ -114,10 +114,6 @@ describe('ChatController (e2e)', () => {
       offTopicMessage: expect.any(String),
       appTitle: expect.any(String),
       appSubtitle: expect.any(String),
-      tool: {
-        name: 'run_ts_snippet',
-        description: expect.any(String),
-      },
     });
     // Internal config (api keys, base URLs, rate-limit constants) must NOT
     // leak through this endpoint.

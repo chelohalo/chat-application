@@ -12,7 +12,19 @@ interface GeminiPart {
    * contain meta-reasoning, drafts, and self-critique, not the final answer.
    */
   thought?: boolean;
-  functionCall?: { name: string; args: Record<string, unknown> };
+  functionCall?: {
+    name: string;
+    args: Record<string, unknown>;
+    /**
+     * Opaque continuation token emitted by Gemini 2.5+ "thinking" models when
+     * they decide to invoke a tool mid-reasoning. Round 2 MUST echo this on
+     * the same functionCall part or the API rejects with 400:
+     *   "Function call is missing a thought_signature in functionCall parts."
+     * Older / non-thinking models (1.5, 2.0, gemma) omit it; the round-2
+     * payload just leaves it undefined and stays valid.
+     */
+    thoughtSignature?: string;
+  };
   functionResponse?: { name: string; response: Record<string, unknown> };
 }
 
@@ -116,7 +128,11 @@ export class GeminiLlmProvider implements LlmProvider {
       : undefined;
 
     // Round 1: collect all parts first, decide tool vs. final-answer second.
-    type PendingCall = { name: string; args: Record<string, unknown> };
+    type PendingCall = {
+      name: string;
+      args: Record<string, unknown>;
+      thoughtSignature?: string;
+    };
     const round1Calls: PendingCall[] = [];
     const round1Text: string[] = [];
     let round1Finish: string | undefined;
@@ -130,6 +146,7 @@ export class GeminiLlmProvider implements LlmProvider {
             round1Calls.push({
               name: part.functionCall.name,
               args: part.functionCall.args ?? {},
+              thoughtSignature: part.functionCall.thoughtSignature,
             });
           } else if (
             !part.thought &&
@@ -175,11 +192,28 @@ export class GeminiLlmProvider implements LlmProvider {
     yield { type: 'tool_result', name: call.name, result: toolResult };
 
     // Round 2: send tool result and stream the final answer.
+    //
+    // The model functionCall part MUST be echoed verbatim, including the
+    // thoughtSignature if the model emitted one. Gemini 2.5+ thinking models
+    // use the signature to resume their internal reasoning across the tool
+    // round-trip; dropping it triggers a 400 "Function call is missing a
+    // thought_signature in functionCall parts." Older models omit the field
+    // entirely, in which case we leave it undefined and the part stays valid.
     const followup: GeminiContent[] = [
       ...contents,
       {
         role: 'model',
-        parts: [{ functionCall: { name: call.name, args: call.args } }],
+        parts: [
+          {
+            functionCall: {
+              name: call.name,
+              args: call.args,
+              ...(call.thoughtSignature !== undefined && {
+                thoughtSignature: call.thoughtSignature,
+              }),
+            },
+          },
+        ],
       },
       {
         role: 'function',

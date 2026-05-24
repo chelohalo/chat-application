@@ -13,8 +13,6 @@ describe('validateEnv', () => {
         OFF_TOPIC_MESSAGE: 'Only sports.',
         APP_TITLE: 'Sports Expert',
         APP_SUBTITLE: 'online',
-        EXPERT_TOOL_NAME: 'lookup_stats',
-        EXPERT_TOOL_DESCRIPTION: 'Look up team or athlete stats.',
       }),
     ).not.toThrow();
   });
@@ -32,24 +30,6 @@ describe('validateEnv', () => {
     expect(() => validateEnv({ EXPERT_DOMAIN: 42 })).toThrow(
       /EXPERT_DOMAIN must be a non-empty string/,
     );
-  });
-
-  it('rejects tool names that violate the provider identifier regex', () => {
-    expect(() =>
-      validateEnv({ EXPERT_TOOL_NAME: 'has spaces' }),
-    ).toThrow(/EXPERT_TOOL_NAME must match/);
-    expect(() =>
-      validateEnv({ EXPERT_TOOL_NAME: 'too-long'.repeat(20) }),
-    ).toThrow(/EXPERT_TOOL_NAME must match/);
-  });
-
-  it('accepts tool names that match the identifier regex', () => {
-    expect(() =>
-      validateEnv({ EXPERT_TOOL_NAME: 'lookup_stats' }),
-    ).not.toThrow();
-    expect(() =>
-      validateEnv({ EXPERT_TOOL_NAME: 'run-ts-snippet' }),
-    ).not.toThrow();
   });
 
   describe('production gating', () => {
@@ -76,14 +56,14 @@ describe('validateEnv', () => {
       try {
         validateEnv({
           NODE_ENV: 'production',
-          EXPERT_TOOL_NAME: 'bad name',
+          APP_TITLE: '',
         });
         fail('expected throw');
       } catch (err) {
         const msg = (err as Error).message;
         expect(msg).toContain('EXPERT_DOMAIN is required');
         expect(msg).toContain('EXPERT_DESCRIPTION is required');
-        expect(msg).toContain('EXPERT_TOOL_NAME must match');
+        expect(msg).toContain('APP_TITLE must be a non-empty string');
       }
     });
   });

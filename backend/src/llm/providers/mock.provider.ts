@@ -38,8 +38,7 @@ export class MockLlmProvider implements LlmProvider {
     let toolNote = '';
 
     if (wantsRun) {
-      const toolName = this.expertConfig.toolName;
-      const tool = tools.find((t) => t.name === toolName);
+      const tool = tools.find((t) => t.name === 'run_ts_snippet');
       if (tool) {
         const snippet = this.extractSnippet(req.newMessage) ?? req.newMessage;
         yield {

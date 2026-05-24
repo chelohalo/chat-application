@@ -22,8 +22,6 @@ services:
       - OFF_TOPIC_MESSAGE
       - APP_TITLE
       - APP_SUBTITLE
-      - EXPERT_TOOL_NAME
-      - EXPERT_TOOL_DESCRIPTION
     ports:
       - "3001:3001"
     healthcheck:
